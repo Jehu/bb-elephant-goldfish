@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Post-commit hook: silently logs every git commit to minime worklog via mcp-cli.
+# Install: ln -sf ../../scripts/worklog-post-commit.sh .git/hooks/post-commit
+
+set -euo pipefail
+
+# Exit gracefully if not in a git repo
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+
+# ─── Resolve mcp-cli path ────────────────────────────────────────────
+# mcp-cli may be an alias (e.g. in Claude Code) or a binary.
+# Try common locations; exit gracefully if not found.
+
+MCP_CLI=""
+if command -v mcp-cli >/dev/null 2>&1; then
+  MCP_CLI="mcp-cli"
+elif [ -x "$HOME/.local/share/claude/versions/current" ]; then
+  MCP_CLI="$HOME/.local/share/claude/versions/current --mcp-cli"
+else
+  # Try to find the latest Claude version with --mcp-cli support
+  CLAUDE_DIR="$HOME/.local/share/claude/versions"
+  if [ -d "$CLAUDE_DIR" ]; then
+    latest=$(ls -t "$CLAUDE_DIR" | grep -v current | head -1)
+    if [ -n "$latest" ] && [ -x "$CLAUDE_DIR/$latest" ]; then
+      MCP_CLI="$CLAUDE_DIR/$latest --mcp-cli"
+    fi
+  fi
+fi
+
+[ -z "$MCP_CLI" ] && exit 0
+
+# ─── Extract commit info ─────────────────────────────────────────────
+
+commit_msg=$(git log -1 --pretty=%s)
+commit_hash=$(git log -1 --pretty=%H)
+branch=$(git branch --show-current)
+changed_files=$(git diff-tree --no-commit-id --name-only -r HEAD)
+remote_url=$(git remote get-url origin 2>/dev/null || echo "")
+
+# ─── Derive project name from remote URL ─────────────────────────────
+
+project=""
+if [ -n "$remote_url" ]; then
+  # Handle SSH (git@github.com:user/repo.git) and HTTPS (https://github.com/user/repo.git)
+  # First strip .git suffix, then extract last path segment
+  project=$(echo "$remote_url" | sed -E 's/\.git$//' | sed -E 's#.*/([^/:]+)$#\1#')
+fi
+
+# Fallback: use directory name
+if [ -z "$project" ]; then
+  project=$(basename "$(git rev-parse --show-toplevel)")
+fi
+
+# ─── Derive category from commit message ─────────────────────────────
+
+msg_lower=$(echo "$commit_msg" | tr '[:upper:]' '[:lower:]')
+
+if echo "$msg_lower" | grep -qE '^fix'; then
+  category="bugfix"
+elif echo "$msg_lower" | grep -qE '^refactor'; then
+  category="refactor"
+elif echo "$msg_lower" | grep -qE '^(doc|readme)'; then
+  category="docs"
+elif echo "$msg_lower" | grep -qE '(ci|deploy|docker|infra)'; then
+  category="ops"
+elif echo "$msg_lower" | grep -qE '^(feat|add)'; then
+  category="feature"
+else
+  category="other"
+fi
+
+# ─── Build JSON payload ──────────────────────────────────────────────
+
+# Convert changed files to JSON array
+files_json="["
+first=true
+while IFS= read -r file; do
+  [ -z "$file" ] && continue
+  if [ "$first" = true ]; then
+    first=false
+  else
+    files_json+=","
+  fi
+  # Escape quotes in filenames
+  escaped=$(echo "$file" | sed 's/"/\\"/g')
+  files_json+="\"$escaped\""
+done <<< "$changed_files"
+files_json+="]"
+
+# Escape quotes in commit message
+escaped_msg=$(echo "$commit_msg" | sed 's/"/\\"/g')
+
+payload=$(cat <<EOF
+{"description":"${escaped_msg}","project":"${project}","category":"${category}","branch":"${branch}","commit":"${commit_hash}","files_changed":${files_json}}
+EOF
+)
+
+# ─── Call mcp-cli in background, silently ─────────────────────────────
+
+($MCP_CLI call minime/minime_worklog_add "$payload" >/dev/null 2>&1 || true) &

@@ -1,0 +1,29 @@
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
+
+# Dependencies and generated output
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Logs and caches
+*.log
+.cache/
+.DS_Store
+
+# Noema runtime storage; keep cortex metadata and traces versioned
+/bb-elephant-goldfish/db/
+/bb-elephant-goldfish/.noema-storage.lock

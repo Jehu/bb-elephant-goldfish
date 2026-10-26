@@ -1,0 +1,23 @@
+Elephant Goldfish for BB
+
+Repository-owned implementation: Copyright (c) 2026 Jehu, MIT License (LICENSE).
+
+This product includes material from:
+  google/elephant-goldfish-model
+  https://github.com/google/elephant-goldfish-model
+  pinned commit: 3d0b34821ce88ad328b0c9bf0e06d7eb5f1cd669
+  licensed under the Apache License, Version 2.0 (upstream/LICENSE).
+
+Files under upstream/ are unmodified copies of the original reviewer personas,
+document standards, execution instructions and seven skill instructions with
+their supporting references. The seven skills under skills/ are adaptations of
+those instructions for BB, not the original upstream files. Their bundled
+references include copies or excerpts of upstream materials; each registered
+skill includes the Apache-2.0 license. server/prompts.ts uses the copied
+personas and standards to assemble tool-less review requests.
+
+Changes from upstream include tool-less OpenAI-compatible reviewer dispatch,
+explicit human diff approval, durable version-bound review state and automatic
+next rounds after confirmed changes. These adaptations are not endorsed by
+Google or the upstream authors. No upstream NOTICE file was present at the
+pinned commit.

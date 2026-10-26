@@ -66,22 +66,40 @@ reason. The plugin does not substitute an Elephant critique and call it Goldfish
 ## Workflow
 
 1. Add a Markdown spec on the project page or use the `egm_register_spec` agent tool.
-2. Start a review: full pipeline, feature spec, implementation readiness,
+   In a conversation's **Elephant Goldfish** tab, you can instead start with
+   a guided brainstorm, draft from a brief or notes, or work on an existing
+   document. Enter a short goal and search the actual workspace for files to
+   include; selected files are shown before drafting. Empty, unavailable,
+   failed and truncated search results are reported rather than invented.
+2. Guided and contextual Elephant actions draft an editable request into the
+   matching thread's BB composer. Review and edit it, then explicitly send it
+   yourself; drafting never starts an Elephant turn. If the composer already
+   contains text, mentions or attachments, choose **Append** or **Cancel**;
+   appending preserves the existing draft. For thread-bound actions on the
+   project page, open the relevant thread tab instead.
+3. Start a review: full pipeline, feature spec, implementation readiness,
    brainstorm lenses, or custom reviewers. Both workspace views let you select
    the custom lenses and standard. Add context files if needed.
-3. Read findings in the page or thread tab. **Request fix**, **Accept trade-off**
+4. Read findings in the page or thread tab. **Request fix**, **Accept trade-off**
    (reason required), or **Dismiss**. A kept risk is not a fix.
-4. Ask the Elephant to resolve requested fixes. It uses `egm_contest` for a
-   counterargument or `egm_propose` for a full revised document. It does not
-   edit the spec directly.
-5. Inspect the diff and explicitly confirm **Apply change**. Coordinate with
+5. Draft a request for the Elephant to resolve selected findings or propose a
+   change. Contextual actions also support drafting from a concept, reviewing
+   a diff and revising a rejected proposal with feedback. After you send the
+   request, the Elephant uses `egm_contest` for a counterargument or
+   `egm_propose` for a full revised document; it does not edit the spec directly.
+   An agreed change need not address a finding: pass `findingIds: []` rather
+   than inventing one. Every proposal is bound to the spec snapshot it read.
+6. Inspect the diff and explicitly confirm **Apply change**. Coordinate with
    other editors: the version check does not lock them out.
-6. After an applied change, once no finding remains unresolved, the next round
-   starts automatically only if the file still matches the applied version. If
-   it changed independently, the run becomes stale; start a fresh review. At
-   the round limit the changed document is explicitly **not re-reviewed**.
-   Cancellation, failure, partial output and stale versions are visible
-   non-success states.
+7. After an applied change, once no finding remains unresolved, the next round
+   starts automatically only if the file still matches the applied version. An
+   ad hoc change is re-reviewed once outstanding findings are resolved, including
+   partial findings from unsuccessful runs. If several ad hoc changes are applied
+   while findings remain, only the latest matching applied version is re-reviewed.
+   The review uses the latest recorded choices or the full preset defaults if none exist.
+   If the file changed independently before re-review, start a fresh review. At the round
+   limit the changed document is explicitly **not re-reviewed**. Cancellation,
+   failure, partial output and stale versions are visible non-success states.
 
 ### Seven skills
 
@@ -123,6 +141,9 @@ an explicit reading list: linked files and URLs are not fetched automatically.
   change.
 - The plugin works with local project sources visible to the BB server. It
   does not currently read or apply specs on another enrolled machine.
+  Workspace choices must correspond to the same authorized local checkout for
+  operations on registered specs; an incompatible thread environment cannot
+  silently target a different checkout.
 - No commits or issue sync are performed by the plugin.
 
 ## Development

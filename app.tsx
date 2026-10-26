@@ -2,10 +2,9 @@
 //
 // Two surfaces share one spec view:
 // - "Spec workspace" page in the sidebar: pick a project, see every spec.
-// - "Elephant Goldfish" tab beside a thread: the thread's project, and a
-//   button that asks this thread (the Elephant) to resolve findings.
+// - "Elephant Goldfish" tab beside a thread: draft requests for that thread.
 // Decisions and applying a proposal happen only here, by the human.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Markdown,
@@ -14,6 +13,7 @@ import {
   useBbNavigate,
   useRealtime,
   useBbContext,
+  useComposer,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
 import type {
@@ -35,6 +35,7 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { makePrompt, writePrompt, writePromptAfterSearch } from "./composer";
 
 const CHANGED = "egm-changed";
 
@@ -163,6 +164,73 @@ function ReviewerBanner({ status }: { status: ReviewerStatus | null }) {
     </p>
   );
 }
+type DraftRequest = (instruction: string, data: Record<string, unknown>) => void;
+
+function GuidedRequest({ threadId, onDraft }: { threadId: string; onDraft: DraftRequest }) {
+  const rpc = useRpc<RpcContract>();
+  const [action, setAction] = useState<"brainstorm" | "draft" | "work" | null>(null);
+  const [goal, setGoal] = useState("");
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<string[]>([]);
+  const [results, setResults] = useState<{ paths: string[]; truncated: boolean } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    if (!action) return;
+    if (!query.trim()) {
+      setSearching(false);
+      setResults(null);
+      setError(null);
+      return;
+    }
+    let current = true;
+    setSearching(true);
+    setResults(null);
+    setError(null);
+    const timer = setTimeout(() => {
+      rpc.call("workspace_search", { threadId, query: query.trim() }).then(
+        (result) => { if (current) setResults(result); },
+        (cause) => { if (current) setError(errorText(cause)); },
+      ).finally(() => { if (current) setSearching(false); });
+    }, 200);
+    return () => { current = false; clearTimeout(timer); };
+  }, [action, query, retry, rpc, threadId]);
+  const instructions = {
+    brainstorm: "Use the Elephant brainstorming workflow to explore the goal and relevant selected files. Do not start work without the user's direction.",
+    draft: "Use the Elephant drafting workflow to draft a spec from the goal and selected brief or notes.",
+    work: "Use the Elephant workflow to work on the selected existing document and the stated goal. Propose changes for human review rather than directly editing the document.",
+  };
+  return (
+    <Section title="Start with Elephant">
+      <p className="text-xs text-muted-foreground">Prepare a request in this thread's composer. You review and send it yourself.</p>
+      <div className="flex flex-wrap gap-2">
+        {([['brainstorm', 'Brainstorm an idea'], ['draft', 'Draft a spec'], ['work', 'Work on a document']] as const).map(([id, label]) => (
+          <Button key={id} size="sm" variant={action === id ? "default" : "outline"} onClick={() => setAction(id)}>{label}</Button>
+        ))}
+      </div>
+      {action && <div className="space-y-2">
+        <label className="block space-y-1 text-xs font-medium">Goal
+          <Input value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="What would you like to accomplish?" />
+        </label>
+        <label className="block space-y-1 text-xs font-medium">Find workspace files
+          <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search files" />
+        </label>
+        {!query.trim() && <p className="text-xs text-muted-foreground">Type a filename or path to search the workspace.</p>}
+        {selected.length > 0 && <div className="space-y-1 text-xs"><p className="font-medium">Selected files</p>{selected.map((path) => <div key={path} className="flex items-center gap-2"><span className="break-all">{path}</span><button type="button" className="underline" onClick={() => setSelected((items) => items.filter((item) => item !== path))}>Remove</button></div>)}</div>}
+        {searching && <p className="text-xs text-muted-foreground">Searching workspace…</p>}
+        {error && <div><ErrorLine error={error} /><Button size="sm" variant="ghost" onClick={() => setRetry((value) => value + 1)}>Retry search</Button></div>}
+        {results && <div className="space-y-1 text-xs">
+          {results.paths.length === 0 && <p className="text-muted-foreground">No matching files. Try another search.</p>}
+          {results.paths.map((path) => <label key={path} className="flex items-start gap-2"><input type="checkbox" checked={selected.includes(path)} onChange={(event) => setSelected((items) => event.target.checked ? [...items, path] : items.filter((item) => item !== path))} /><span className="break-all">{path}</span></label>)}
+          {results.truncated && <p className="text-muted-foreground">Results truncated. Narrow your search to see more files.</p>}
+        </div>}
+        <Button size="sm" disabled={!goal.trim() || (action === "work" && selected.length === 0)} onClick={() => onDraft(instructions[action], { goal: goal.trim(), files: selected })}>Draft in composer</Button>
+      </div>}
+    </Section>
+  );
+}
+
 
 // --- spec list -------------------------------------------------------------
 
@@ -476,7 +544,7 @@ function FindingCard({ finding, running, onDecide }: { finding: Finding; running
   const [open, setOpen] = useState(finding.state === "open" || finding.state === "contested");
   const decidable = ["open", "fix_requested", "contested"].includes(finding.state);
   return (
-    <li className="space-y-2 rounded-md border p-3">
+    <div className="space-y-2 rounded-md border p-3">
       <button type="button" className="flex w-full items-start gap-2 text-left" onClick={() => setOpen((v) => !v)}>
         <Badge className={SEVERITY_TONE[finding.severity]}>{finding.rawSeverity === "(none)" ? finding.severity : finding.rawSeverity}</Badge>
         <span className="flex-1 text-sm font-medium">{finding.title}</span>
@@ -510,12 +578,13 @@ function FindingCard({ finding, running, onDecide }: { finding: Finding; running
           )}
         </>
       )}
-    </li>
+    </div>
   );
 }
 
-function ProposalCard({ proposal, path, running, onApply, onReject }: { proposal: Proposal; path: string; running: boolean; onApply: () => void; onReject: () => void }) {
+function ProposalCard({ proposal, path, running, onApply, onReject, onReviewDiff, onRevise }: { proposal: Proposal; path: string; running: boolean; onApply: () => void; onReject: () => void; onReviewDiff?: () => void; onRevise?: (feedback: string) => void }) {
   const [confirming, setConfirming] = useState(false);
+  const [feedback, setFeedback] = useState("");
   const pending = proposal.state === "proposed";
   return (
     <div className="space-y-2 rounded-md border p-3">
@@ -537,6 +606,8 @@ function ProposalCard({ proposal, path, running, onApply, onReject }: { proposal
         </span>
       </div>
       <p className="text-sm">{proposal.summary}</p>
+      {onReviewDiff && proposal.diff && <Button size="sm" variant="outline" onClick={onReviewDiff}>Draft diff review request</Button>}
+      {onRevise && <div className="flex flex-wrap gap-2"><Input aria-label="Revision feedback" value={feedback} onChange={(event) => setFeedback(event.target.value)} placeholder="What should change?" /><Button size="sm" variant="outline" disabled={!feedback.trim()} onClick={() => onRevise(feedback.trim())}>Draft revision request</Button></div>}
       {proposal.stateReason && <p className="text-xs text-muted-foreground">{proposal.stateReason}</p>}
       {proposal.backupPath && (
         <p className="text-xs text-muted-foreground">
@@ -577,7 +648,7 @@ function ProposalCard({ proposal, path, running, onApply, onReject }: { proposal
   );
 }
 
-function SpecDetail({ specId, threadId, onBack }: { specId: string; threadId: string | null; onBack: () => void }) {
+function SpecDetail({ specId, threadId, onBack, onDraft }: { specId: string; threadId: string | null; onBack: () => void; onDraft?: DraftRequest }) {
   const rpc = useRpc<RpcContract>();
   const reviewer = useReviewer();
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -585,6 +656,7 @@ function SpecDetail({ specId, threadId, onBack }: { specId: string; threadId: st
   const [actionError, setActionError] = useState<string | null>(null);
   const [showDoc, setShowDoc] = useState(false);
   const [showResolved, setShowResolved] = useState(false);
+  const [selectedFindings, setSelectedFindings] = useState<string[]>([]);
   const load = useCallback(() => {
     rpc.call("spec_detail", { specId }).then(
       (result) => {
@@ -610,7 +682,6 @@ function SpecDetail({ specId, threadId, onBack }: { specId: string; threadId: st
       },
     );
 
-  const latest = detail?.runs[0] ?? null;
   const visibleFindings = useMemo(() => {
     if (!detail) return [];
     return detail.findings.filter((f) => (showResolved ? true : ["open", "fix_requested", "contested", "proposal_pending"].includes(f.state)));
@@ -626,7 +697,12 @@ function SpecDetail({ specId, threadId, onBack }: { specId: string; threadId: st
     tradeoffs: detail.findings.filter((f) => f.state === "accepted_tradeoff").length,
     dismissed: detail.findings.filter((f) => f.state === "dismissed").length,
   };
-  const waitingForElephant = detail.findings.some((f) => f.state === "fix_requested");
+  const eligibleFindings = detail.findings.filter((finding) => ["open", "fix_requested", "contested"].includes(finding.state) && detail.runs.some((run) => run.id === finding.runId && run.threadId === threadId && run.state !== "running"));
+  const selectedRunId = eligibleFindings.find((finding) => selectedFindings.includes(finding.id))?.runId;
+  const chosenFindings = eligibleFindings.filter((finding) => finding.runId === selectedRunId && selectedFindings.includes(finding.id));
+  const specContext = { specId: spec.id, path: spec.path, title: spec.title, currentHash: spec.currentHash };
+  const proposalContext = (proposal: Proposal) => ({ ...specContext, proposalId: proposal.id, runId: proposal.runId, findingIds: proposal.findingIds, state: proposal.state, summary: proposal.summary, baseHash: proposal.baseHash, diff: proposal.diff });
+  const proposalInThread = (proposal: Proposal) => proposal.runId ? detail.runs.some((run) => run.id === proposal.runId && run.threadId === threadId) : threadId !== null && proposal.author === threadId;
 
   return (
     <div className="space-y-5">
@@ -641,6 +717,8 @@ function SpecDetail({ specId, threadId, onBack }: { specId: string; threadId: st
         <ReviewerBanner status={reviewer} />
       </div>
       <ErrorLine error={actionError} />
+      {onDraft && spec.exists && <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => onDraft("Use the Elephant drafting workflow to draft a spec from this concept document.", specContext)}>Draft from concept</Button><Button size="sm" variant="outline" onClick={() => onDraft("Propose a change to this document for human review; do not directly edit it.", specContext)}>Ask for change proposal</Button></div>}
+      {!threadId && <p className="text-xs text-muted-foreground">To draft an Elephant request, open this spec in the relevant thread's Elephant Goldfish tab.</p>}
 
       {pendingProposals.length > 0 && (
         <Section title="Waiting for your confirmation">
@@ -652,6 +730,7 @@ function SpecDetail({ specId, threadId, onBack }: { specId: string; threadId: st
               path={spec.path}
               onApply={() => act(rpc.call("proposal_apply", { proposalId: p.id, baseHash: p.baseHash, opId: opId() }))}
               onReject={() => act(rpc.call("proposal_reject", { proposalId: p.id, reason: "" }))}
+              onReviewDiff={onDraft && p.diff && proposalInThread(p) ? () => onDraft("Review the proposed diff and explain its implications; do not apply it.", proposalContext(p)) : undefined}
             />
           ))}
         </Section>
@@ -661,11 +740,7 @@ function SpecDetail({ specId, threadId, onBack }: { specId: string; threadId: st
         title="Findings"
         actions={
           <div className="flex items-center gap-2">
-            {threadId && latest && latest.threadId === threadId && waitingForElephant && (
-              <Button size="sm" variant="outline" onClick={() => act(rpc.call("elephant_request", { runId: latest.id, threadId }))}>
-                Ask Elephant to resolve
-              </Button>
-            )}
+            {onDraft && chosenFindings.length > 0 && <Button size="sm" variant="outline" onClick={() => onDraft("Refresh the review status first. Resolve only the selected finding IDs from this review run: contest any that are incorrect with a specific rationale, or propose fixes for those you agree with using only selected IDs. Do not act on unselected findings or directly edit the document; proposals require human review.", { ...specContext, runId: selectedRunId, findingIds: chosenFindings.map((finding) => finding.id), findings: chosenFindings.map((finding) => ({ id: finding.id, runId: finding.runId, state: finding.state, title: finding.title, body: finding.body })) })}>Ask Elephant to resolve selected</Button>}
             <label className="flex items-center gap-1 text-xs text-muted-foreground">
               <input type="checkbox" checked={showResolved} onChange={(e) => setShowResolved(e.target.checked)} />
               Show resolved
@@ -676,19 +751,23 @@ function SpecDetail({ specId, threadId, onBack }: { specId: string; threadId: st
         <p className="text-xs text-muted-foreground">
           {counts.fixed} fixed · {counts.tradeoffs} accepted trade-off(s) · {counts.dismissed} dismissed
         </p>
+        {onDraft && <p className="text-xs text-muted-foreground">Select up to 100 findings from one review run at a time.</p>}
         {visibleFindings.length === 0 ? (
           <p className="text-sm text-muted-foreground">{showResolved ? "No findings yet." : "Nothing waits for a decision."}</p>
         ) : (
-          <ul className="space-y-2">
+          <div className="space-y-2">
             {visibleFindings.map((f) => (
+              <div key={f.id} className="space-y-1">
+              {onDraft && eligibleFindings.some((finding) => finding.id === f.id) && <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={chosenFindings.some((finding) => finding.id === f.id)} disabled={(selectedRunId !== undefined && selectedRunId !== f.runId) || (chosenFindings.length >= 100 && !chosenFindings.some((finding) => finding.id === f.id))} onChange={(event) => setSelectedFindings(event.target.checked ? [...chosenFindings.map((finding) => finding.id), f.id] : chosenFindings.filter((finding) => finding.id !== f.id).map((finding) => finding.id))} />Select finding {f.id}</label>}
               <FindingCard
                 key={f.id}
                 finding={f}
                 running={runningRuns.has(f.runId)}
                 onDecide={(kind, rationale) => act(rpc.call("finding_decide", { findingId: f.id, kind, rationale, opId: opId() }))}
               />
+              </div>
             ))}
-          </ul>
+          </div>
         )}
       </Section>
 
@@ -702,7 +781,7 @@ function SpecDetail({ specId, threadId, onBack }: { specId: string; threadId: st
       {otherProposals.length > 0 && (
         <Section title="Earlier proposals">
           {otherProposals.map((p) => (
-            <ProposalCard key={p.id} proposal={p} path={spec.path} running={p.runId !== null && runningRuns.has(p.runId)} onApply={() => {}} onReject={() => {}} />
+            <ProposalCard key={p.id} proposal={p} path={spec.path} running={p.runId !== null && runningRuns.has(p.runId)} onApply={() => {}} onReject={() => {}} onReviewDiff={onDraft && p.diff && proposalInThread(p) ? () => onDraft("Review the proposed diff and explain its implications; do not apply it.", proposalContext(p)) : undefined} onRevise={onDraft && p.state === "rejected" && proposalInThread(p) ? (feedback) => onDraft("Revise the rejected proposal using the feedback and propose the revision for human review; do not directly edit the document.", { ...proposalContext(p), feedback }) : undefined} />
           ))}
         </Section>
       )}
@@ -733,11 +812,11 @@ function SpecDetail({ specId, threadId, onBack }: { specId: string; threadId: st
 
 // --- surfaces ----------------------------------------------------------------
 
-function Workspace({ projectId, threadId }: { projectId: string; threadId: string | null }) {
+function Workspace({ projectId, threadId, onDraft }: { projectId: string; threadId: string | null; onDraft?: DraftRequest }) {
   const [specId, setSpecId] = useState<string | null>(null);
   useEffect(() => setSpecId(null), [projectId]);
   return specId ? (
-    <SpecDetail specId={specId} threadId={threadId} onBack={() => setSpecId(null)} />
+    <SpecDetail key={specId} specId={specId} threadId={threadId} onBack={() => setSpecId(null)} onDraft={onDraft} />
   ) : (
     <SpecList projectId={projectId} onOpen={setSpecId} />
   );
@@ -797,17 +876,52 @@ function ProjectPage() {
 function ThreadTab({ threadId }: { threadId: string }) {
   const rpc = useRpc<RpcContract>();
   const navigate = useBbNavigate();
+  const composer = useComposer();
+  const currentThread = useRef<string | null>(threadId);
+  currentThread.current = threadId;
+  const draftOperation = useRef<AbortController | null>(null);
+  useEffect(() => { currentThread.current = threadId; return () => { currentThread.current = null; draftOperation.current?.abort(); }; }, [threadId]);
+  const [pending, setPending] = useState<{ threadId: string; prompt: string; contextual: boolean } | null>(null);
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const [draftMessage, setDraftMessage] = useState<string | null>(null);
+  useEffect(() => { setPending(null); setDraftError(null); setDraftMessage(null); setProjectId(null); }, [threadId]);
+  const commitDraft = async (target: string, prompt: string, append: boolean, contextual: boolean) => {
+    draftOperation.current?.abort();
+    const operation = new AbortController();
+    draftOperation.current = operation;
+    try {
+      const isCurrent = () => currentThread.current === target;
+      const result = contextual
+        ? await writePromptAfterSearch(composer, target, prompt, append, isCurrent, operation.signal, () => rpc.call("workspace_search", { threadId: target, query: "" }))
+        : writePrompt(composer, target, prompt, append, () => !operation.signal.aborted && isCurrent());
+      if (operation.signal.aborted || result === null) return;
+      if (result === "confirm") setPending({ threadId: target, prompt, contextual });
+      else { setPending(null); setDraftMessage("Request added to the composer. Review it and send when ready."); }
+      setDraftError(null);
+    } catch (cause) {
+      if (!operation.signal.aborted && currentThread.current === target) setDraftError(`${errorText(cause)} Open the matching thread composer and try again.`);
+    }
+  };
+  const draft: DraftRequest = (instruction, data) => {
+    setDraftMessage(null);
+    void commitDraft(threadId, makePrompt(instruction, data), false, false);
+  };
+  const draftContextual: DraftRequest = (instruction, data) => {
+    setDraftMessage(null);
+    void commitDraft(threadId, makePrompt(instruction, data), false, true);
+  };
   const [projectId, setProjectId] = useState<string | null>(null);
   const [active, setActive] = useState<Run[]>([]);
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(() => {
     rpc.call("thread_overview", { threadId }).then(
       (result) => {
+        if (currentThread.current !== threadId) return;
         setProjectId(result.projectId);
         setActive(result.activeRuns);
         setError(null);
       },
-      (cause) => setError(errorText(cause)),
+      (cause) => { if (currentThread.current === threadId) setError(errorText(cause)); },
     );
   }, [rpc, threadId]);
   useEffect(load, [load]);
@@ -823,7 +937,11 @@ function ThreadTab({ threadId }: { threadId: string }) {
         </Button>
       </div>
       <ErrorLine error={error} />
-      {projectId && <Workspace projectId={projectId} threadId={threadId} />}
+      <ErrorLine error={draftError} />
+      {draftMessage && <p role="status" className="text-xs text-muted-foreground">{draftMessage}</p>}
+      {pending && pending.threadId === threadId && <div className="space-y-2 rounded-md border p-3"><p className="text-sm">The composer already has a draft. Append this request to its latest contents, or cancel without changing it?</p><div className="flex gap-2"><Button size="sm" onClick={() => void commitDraft(pending.threadId, pending.prompt, true, pending.contextual)}>Append</Button><Button size="sm" variant="ghost" onClick={() => { draftOperation.current?.abort(); setPending(null); setDraftError(null); }}>Cancel</Button></div></div>}
+      <GuidedRequest key={threadId} threadId={threadId} onDraft={draft} />
+      {projectId && <Workspace key={`workspace:${threadId}`} projectId={projectId} threadId={threadId} onDraft={draftContextual} />}
     </div>
   );
 }

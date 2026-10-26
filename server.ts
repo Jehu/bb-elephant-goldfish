@@ -7,6 +7,8 @@
 //   Deciding findings and applying proposals are human-only (RPC from the UI).
 // - Skills in skills/ adapt the seven upstream EGM skills to these tools.
 import { existsSync } from "node:fs";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -21,7 +23,7 @@ import {
 import { Engine, EngineError } from "./server/engine.ts";
 import { GoldfishClient } from "./server/goldfish.ts";
 import { MIGRATIONS, Store } from "./server/store.ts";
-import { WorkspaceError } from "./server/workspace.ts";
+import { resolveInside, WorkspaceError } from "./server/workspace.ts";
 
 export { rpcContract };
 export type * from "./server/contract.ts";
@@ -182,27 +184,31 @@ export default async function plugin(bb: BbPluginApi) {
       guard(() => engine.decide(findingId, kind, rationale, "human", opId)),
     proposal_apply: ({ proposalId, baseHash, opId }) => guard(() => engine.applyProposal(proposalId, baseHash, opId)),
     proposal_reject: ({ proposalId, reason }) => guard(() => engine.rejectProposal(proposalId, reason)),
-    elephant_request: ({ runId, threadId }) =>
+    workspace_search: ({ threadId, query }) =>
       guard(async () => {
-        const run = store.getRun(runId);
-        if (!run) throw new EngineError("Unknown run.");
-        if (!run.threadId || run.threadId !== threadId) throw new EngineError("This run is not linked to this Elephant thread.");
-        const spec = store.getSpec(run.specId)!;
-        const waiting = store
-          .listFindingsForRun(runId)
-          .filter((f) => f.state === "fix_requested" || f.state === "open");
-        const text = [
-          `[Elephant Goldfish] The human asks you, the Elephant, to resolve review findings on \`${spec.path}\` (run ${runId}, round ${run.round}).`,
-          `Use the egm-resolve skill. Read them with egm_review_status, then for each finding either contest it with egm_contest (with a rationale) or include it in one egm_propose call with the full revised document.`,
-          `Do not edit the spec file directly: proposals are applied only after the human confirms the diff in the Elephant Goldfish tab.`,
-          `Findings waiting: ${waiting.length}.`,
-        ].join("\n");
-        const result = await bb.sdk.threads.send({
-          threadId,
-          mode: "auto",
-          input: [{ type: "text", text, mentions: [] }],
-        });
-        return { delivery: result.delivery };
+        const thread = await bb.sdk.threads.get({ threadId });
+        const root = await projectRoot(thread.projectId);
+        if (!root || !thread.environmentId) throw new EngineError("Thread workspace is unavailable. Open a thread with an available project checkout and retry.");
+        const environment = await bb.sdk.environments.get({ environmentId: thread.environmentId });
+        const project = await bb.sdk.projects.get({ projectId: thread.projectId });
+        const sources = [...project.sources].sort((a, b) => Number(b.isDefault) - Number(a.isDefault));
+        const source = sources.find((item) => item.type === "local_path" && existsSync(item.path));
+        if (environment.projectId !== thread.projectId || environment.status !== "ready" || !environment.path || !source || environment.hostId !== source.hostId || await fs.realpath(environment.path).catch(() => null) !== await fs.realpath(root).catch(() => null)) {
+          throw new EngineError("Thread workspace does not match the server's available project checkout. Open a thread in that checkout and retry.");
+        }
+        const result = await bb.sdk.environments.paths({ environmentId: thread.environmentId, query, includeFiles: "true", includeDirectories: "false" });
+        const paths: string[] = [];
+        for (const entry of result.paths) {
+          if (entry.kind !== "file" || !entry.path || path.isAbsolute(entry.path)) continue;
+          try {
+            const absolute = await resolveInside(root, entry.path);
+            const stat = await fs.lstat(absolute);
+            if (stat.isFile() && !stat.isSymbolicLink()) paths.push(entry.path);
+          } catch {
+            // A search result may disappear or point outside the authorized checkout.
+          }
+        }
+        return { paths, truncated: result.truncated };
       }),
   }, {
     // Lets `bb plugin rpc call elephant-goldfish <method>` drive the workspace from a terminal or script.
@@ -322,11 +328,11 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "egm_propose",
     description:
-      "As the Elephant, propose a revised spec addressing findings. Pass the COMPLETE new document content. It is stored as a diff bound to the current version; the human must confirm it before it is written. Never edit the spec file yourself.",
+      "As the Elephant, propose a complete revised spec, either addressing findings or making an agreed ad hoc change. Pass the COMPLETE new document content and findingIds for the findings addressed, or an empty array when there are none; never invent findings. The diff is bound to the current spec snapshot and the human must confirm it before it is written. Never edit the spec file yourself.",
     presentation: { label: { pending: "Proposing a change", completed: "Proposed a change" } },
     parameters: z.object({
       specId: z.string(),
-      findingIds: z.array(z.string()).min(1).max(100),
+      findingIds: z.array(z.string()).max(100),
       content: z.string().min(1).max(1_500_000),
       summary: z.string().min(1).max(2000),
     }),

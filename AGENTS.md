@@ -83,6 +83,7 @@ When the user requests a durable behavior change, record it here or in the relev
 - This repository implements a BB spec workspace adapting `google/elephant-goldfish-model`; see `README.md` for installation and workflows.
 - The root owns project-wide guidance and configuration. `.bend.json` selects Beads; `.beads/` holds its configuration and tracker data.
 - Development checks are `npm run typecheck`, `npm test`, and `npm run build` (Node 24); reload with `bb plugin reload elephant-goldfish`.
+- Elephant UI actions draft requests only into the matching existing thread's BB composer; the human reviews, edits and explicitly sends. Never send or start an Elephant turn automatically, replace an occupied draft, or guess a thread from the project page. Preserve existing text, mentions and attachments when the user chooses to append; cancelling an in-flight contextual append must prevent its eventual workspace search result from changing the draft.
 - Applying proposed changes requires explicit confirmation, a version check, a retained backup and atomic replacement. External editors are not locked; concurrent edits can be overwritten, so coordinate writers.
 - Repository-owned work is MIT-licensed in `LICENSE`. Preserve upstream license and attribution requirements when importing third-party code or skills.
 - `.gitignore` excludes dependencies, generated output, secrets, logs, local Noema database/lock files, and EGM staging and pre-image files; review reports remain versionable.

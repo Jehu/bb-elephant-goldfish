@@ -8,17 +8,16 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import plugin from "../server.ts";
 import { Store } from "./store.ts";
 
-test("agent tools enforce project ownership and requests target the launching thread", async () => {
+test("agent tools enforce project ownership", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "egm-tools-"));
   const db = new Database(":memory:");
   const tools = new Map<string, (params: Record<string, unknown>, context: { projectId: string; threadId: string }) => Promise<unknown>>();
   const schemas = new Map<string, { safeParse: (value: unknown) => { success: boolean } }>();
   let rpc: Record<string, (params: Record<string, unknown>) => Promise<unknown>> = {};
-  const sent: string[] = [];
   const bb = {
     settings: { define: () => ({ get: async () => ({ goldfishBaseUrl: "", goldfishModel: "", goldfishApiKey: "", goldfishApiKeyEnv: "", goldfishTimeoutSeconds: 30 }) }) },
     storage: { database: () => db, migrate: (_db: unknown, migrations: string[]) => migrations.forEach((sql) => db.exec(sql)) },
-    sdk: { projects: { get: async () => ({ sources: [{ type: "local_path", path: root, isDefault: true }] }) }, threads: { send: async ({ threadId }: { threadId: string }) => { sent.push(threadId); return { delivery: "sent" }; } } },
+    sdk: { projects: { get: async () => ({ sources: [{ type: "local_path", path: root, isDefault: true }] }) } },
     realtime: { publish: () => {} }, log: { info: () => {}, warn: () => {} },
     rpc: { register: (_contract: unknown, handlers: typeof rpc) => { rpc = handlers; } },
     agents: { registerTool: (tool: { name: string; parameters: { safeParse: (value: unknown) => { success: boolean } }; execute: (params: Record<string, unknown>, context: { projectId: string; threadId: string }) => Promise<unknown> }) => { tools.set(tool.name, tool.execute); schemas.set(tool.name, tool.parameters); }, configure: () => {} },
@@ -35,7 +34,7 @@ test("agent tools enforce project ownership and requests target the launching th
     const proposeSchema = schemas.get("egm_propose")!;
     const proposalParams = { specId: "spec-a", findingIds: ["finding-a"], content: "# Updated spec\n", summary: "Change" };
     assert.equal(proposeSchema.safeParse(proposalParams).success, true);
-    assert.equal(proposeSchema.safeParse({ ...proposalParams, findingIds: [] }).success, false);
+    assert.equal(proposeSchema.safeParse({ ...proposalParams, findingIds: [] }).success, true);
     assert.deepEqual(store.listProposals("spec-a"), []);
     const foreign = { projectId: "b", threadId: "thread-b" };
     for (const [name, params] of [
@@ -51,13 +50,6 @@ test("agent tools enforce project ownership and requests target the launching th
     assert.equal(store.listProposals("spec-a").length, 0);
     const status = await tools.get("egm_review_status")!({ specId: "spec-a" }, { projectId: "a", threadId: "thread-a" });
     assert.equal(typeof status, "string");
-    await assert.rejects(rpc.elephant_request!({ runId: "run-a", threadId: "thread-b" }), /not linked/);
-    assert.deepEqual(sent, []);
-    assert.deepEqual(await rpc.elephant_request!({ runId: "run-a", threadId: "thread-a" }), { delivery: "sent" });
-    assert.deepEqual(sent, ["thread-a"]);
-    db.prepare("UPDATE runs SET thread_id = NULL WHERE id = ?").run("run-a");
-    await assert.rejects(rpc.elephant_request!({ runId: "run-a", threadId: "thread-a" }), /not linked/);
-    assert.deepEqual(sent, ["thread-a"]);
     const proposed = JSON.parse(await tools.get("egm_propose")!({ specId: "spec-a", findingIds: ["finding-a"], content: "# Updated spec\n", summary: "Change" }, { projectId: "a", threadId: "thread-a" }) as string) as { id: string; baseHash: string };
     const target = path.join(root, "spec.md");
     const backup = path.join(root, "backup.md");
@@ -84,5 +76,64 @@ test("agent tools enforce project ownership and requests target the launching th
   } finally {
     db.close();
     await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace search uses the thread checkout and returns confined files", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "egm-search-"));
+  const other = await fs.mkdtemp(path.join(os.tmpdir(), "egm-other-"));
+  const db = new Database(":memory:");
+  let rpc: Record<string, (params: Record<string, unknown>) => Promise<unknown>> = {};
+  let environment = { projectId: "a", hostId: "host", path: root, status: "ready" };
+  let results = { paths: [
+    { kind: "file", path: "notes.md" },
+    { kind: "directory", path: "folder" },
+    { kind: "file", path: "../outside.md" },
+    { kind: "file", path: "escape.md" },
+  ], truncated: true };
+  let failSearch = false;
+  const searches: unknown[] = [];
+  const bb = {
+    settings: { define: () => ({ get: async () => ({ goldfishBaseUrl: "", goldfishModel: "", goldfishApiKey: "", goldfishApiKeyEnv: "", goldfishTimeoutSeconds: 30 }) }) },
+    storage: { database: () => db, migrate: (_db: unknown, migrations: string[]) => migrations.forEach((sql) => db.exec(sql)) },
+    sdk: {
+      projects: { get: async () => ({ sources: [{ type: "local_path", path: root, hostId: "host", isDefault: true }] }) },
+      threads: { get: async ({ threadId }: { threadId: string }) => ({ projectId: "a", environmentId: threadId === "missing" ? null : "env" }) },
+      environments: {
+        get: async () => environment,
+        paths: async (args: unknown) => { searches.push(args); if (failSearch) throw new Error("search failed"); return results; },
+      },
+    },
+    realtime: { publish: () => {} }, log: { info: () => {}, warn: () => {} },
+    rpc: { register: (_contract: unknown, handlers: typeof rpc) => { rpc = handlers; } },
+    agents: { registerTool: () => {}, configure: () => {} }, cli: { register: () => {} }, onDispose: () => {},
+  };
+  try {
+    await fs.writeFile(path.join(root, "notes.md"), "notes");
+    await fs.writeFile(path.join(other, "outside.md"), "outside");
+    await fs.symlink(path.join(other, "outside.md"), path.join(root, "escape.md"));
+    await plugin(bb as unknown as BbPluginApi);
+    assert.deepEqual(await rpc.workspace_search!({ threadId: "thread", query: "notes" }), { paths: ["notes.md"], truncated: true });
+    assert.deepEqual(searches[0], { environmentId: "env", query: "notes", includeFiles: "true", includeDirectories: "false" });
+    results = { paths: [], truncated: false };
+    assert.deepEqual(await rpc.workspace_search!({ threadId: "thread", query: "none" }), { paths: [], truncated: false });
+    await assert.rejects(rpc.workspace_search!({ threadId: "missing", query: "" }), /unavailable/);
+    environment = { ...environment, path: other };
+    await assert.rejects(rpc.workspace_search!({ threadId: "thread", query: "" }), /does not match/);
+    environment = { ...environment, path: root, hostId: "remote" };
+    await assert.rejects(rpc.workspace_search!({ threadId: "thread", query: "" }), /does not match/);
+    environment = { ...environment, hostId: "host", projectId: "other" };
+    await assert.rejects(rpc.workspace_search!({ threadId: "thread", query: "" }), /does not match/);
+    environment = { ...environment, projectId: "a", status: "stopped" };
+    await assert.rejects(rpc.workspace_search!({ threadId: "thread", query: "" }), /does not match/);
+    assert.equal(searches.length, 2, "incompatible checkouts must not be searched");
+    environment = { ...environment, status: "ready" };
+    failSearch = true;
+    await assert.rejects(rpc.workspace_search!({ threadId: "thread", query: "" }), /search failed/);
+    assert.equal("elephant_request" in rpc, false);
+  } finally {
+    db.close();
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(other, { recursive: true, force: true });
   }
 });

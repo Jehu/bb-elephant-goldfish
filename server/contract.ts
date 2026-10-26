@@ -308,10 +308,9 @@ export const rpcContract = defineRpcContract({
     input: z.object({ proposalId: id, reason: z.string().max(4000).default("") }),
     output: proposalSchema,
   },
-  /** Ask the Elephant thread (the launching thread) to work on open findings. */
-  elephant_request: {
-    input: z.object({ runId: id, threadId: z.string() }),
-    output: z.object({ delivery: z.string() }),
+  workspace_search: {
+    input: z.object({ threadId: z.string().min(1), query: z.string().max(1000) }),
+    output: z.object({ paths: z.array(z.string()), truncated: z.boolean() }),
   },
 });
 export type RpcContract = typeof rpcContract;

@@ -166,6 +166,23 @@ test("concurrent decisions with the same operation id return the same result", a
   assert.deepEqual(results[0], results[1]);
 });
 
+test("proposals reject findings from different review runs without changing workflow state", async () => {
+  const { engine, spec, store, review } = await setup([{ content: FINDING("First gap") }, { content: FINDING("Second gap") }]);
+  const firstRun = await review("implementation");
+  const [first] = store.listFindingsForRun(firstRun.id);
+  const secondRun = await review("implementation");
+  const [second] = store.listFindingsForRun(secondRun.id);
+  // Simulate unresolved findings from two runs, as can exist in persisted data.
+  store.setFindingState(first!.id, "open");
+
+  for (const ids of [[first!.id, second!.id], [second!.id, first!.id]]) {
+    await assert.rejects(engine.propose(spec.id, ids, "# Spec\n\nSecond version.\n", "fix", "thr"), /same review run/);
+    assert.deepEqual(store.listProposals(spec.id), []);
+    assert.equal(store.getFinding(first!.id)!.state, "open");
+    assert.equal(store.getFinding(second!.id)!.state, "open");
+  }
+});
+
 test("confirmed apply preserves a backup, resolves the finding, and starts the next round", async () => {
   const { root, engine, spec, store, endpoint, review } = await setup([{ content: FINDING("Gap A") }, { content: "NO FINDINGS" }]);
   const run = await review("implementation");
@@ -590,3 +607,241 @@ test("failed reconciliation transition retains intent without fixing findings or
   assert.equal(store.listApplyIntents()[0]!.proposalId, proposal.id);
   assert.equal(await fs.readFile(backup, "utf8"), "# Spec\n\nFirst version.\n");
 });
+
+test("an ad hoc proposal applies without synthetic findings and starts a default fresh review", async () => {
+  const { root, engine, spec, store, endpoint } = await setup([]);
+  const content = "# Spec\n\nAd hoc change.\n";
+  const proposal = await engine.propose(spec.id, [], content, "improve the spec", "thr");
+  assert.equal(proposal.runId, null);
+  assert.deepEqual(proposal.findingIds, []);
+  assert.deepEqual(store.listRuns(spec.id), []);
+  assert.deepEqual(store.listFindings(spec.id), []);
+  assert.match(proposal.diff, /^\+Ad hoc change\.$/m);
+
+  const applied = await engine.applyProposal(proposal.id, proposal.baseHash, "ad-hoc-apply");
+  await engine.settle();
+  assert.equal(applied.state, "applied");
+  assert.equal(await fs.readFile(path.join(root, "docs/spec.md"), "utf8"), content);
+  assert.equal(await fs.readFile(applied.backupPath!, "utf8"), "# Spec\n\nFirst version.\n");
+  assert.deepEqual(store.listFindings(spec.id), []);
+  assert.deepEqual(store.listApplyIntents(), []);
+  const runs = store.listRuns(spec.id);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0]!.preset, "full");
+  assert.equal(runs[0]!.maxRounds, 3);
+  assert.deepEqual(runs[0]!.context, []);
+  assert.equal(runs[0]!.parentRunId, null);
+  assert.equal(runs[0]!.targetHash, sha256(content));
+  assert.equal(endpoint.requests.length, 5);
+  assert.deepEqual(await engine.applyProposal(proposal.id, proposal.baseHash, "ad-hoc-apply"), applied);
+});
+
+test("an ad hoc apply starts a fresh review using the latest review configuration", async () => {
+  const { root, engine, spec, store } = await setup([]);
+  await fs.writeFile(path.join(root, "notes.md"), "review context");
+  const prior = await engine.startRun(spec.id, { preset: "custom", lenses: ["design_critic"], standard: "feature-spec-standard", context: ["notes.md"], maxRounds: 2, threadId: "prior-thread" });
+  await engine.settle();
+  const priorStages = store.listStages(prior.id).map(({ lens, standard }) => ({ lens, standard }));
+  const content = "# Spec\n\nChanged independently.\n";
+  const proposal = await engine.propose(spec.id, [], content, "change", "thr");
+  await engine.applyProposal(proposal.id, proposal.baseHash, "ad-hoc-custom");
+  await engine.settle();
+  const runs = store.listRuns(spec.id);
+  assert.equal(runs.length, 2);
+  const fresh = runs.find((run) => run.id !== prior.id)!;
+  assert.equal(fresh.parentRunId, null);
+  assert.equal(fresh.round, 1);
+  assert.equal(fresh.preset, prior.preset);
+  assert.equal(fresh.maxRounds, prior.maxRounds);
+  assert.deepEqual(fresh.context, prior.context);
+  assert.equal(fresh.targetHash, sha256(content));
+  assert.deepEqual(store.listStages(fresh.id).map(({ lens, standard }) => ({ lens, standard })), priorStages);
+  assert.deepEqual(store.listFindings(spec.id), []);
+});
+
+test("ad hoc proposals enforce confirmation and disk hashes without starting a review", async () => {
+  const { root, engine, spec, store } = await setup([]);
+  const proposal = await engine.propose(spec.id, [], "# Spec\n\nProposed.\n", "change", "thr");
+  await assert.rejects(engine.applyProposal(proposal.id, "wrong-hash", "ad-hoc-wrong"));
+  assert.equal(store.getProposal(proposal.id)!.state, "proposed");
+  assert.equal(store.getOperation("ad-hoc-wrong"), null);
+  const edited = "# Spec\n\nIndependent edit.\n";
+  await fs.writeFile(path.join(root, "docs/spec.md"), edited);
+  const result = await engine.applyProposal(proposal.id, proposal.baseHash, "ad-hoc-stale");
+  await engine.settle();
+  assert.equal(result.state, "stale");
+  assert.equal(await fs.readFile(path.join(root, "docs/spec.md"), "utf8"), edited);
+  assert.deepEqual(store.listRuns(spec.id), []);
+  assert.deepEqual(store.listFindings(spec.id), []);
+  assert.deepEqual(store.listApplyIntents(), []);
+});
+
+test("ad hoc proposals cannot be created or applied during a running review", async () => {
+  const { engine, spec, store, endpoint } = await setup([{ hang: true }]);
+  const proposal = await engine.propose(spec.id, [], "# Spec\n\nProposed.\n", "change", "thr");
+  const run = await engine.startRun(spec.id, { preset: "implementation", context: [], maxRounds: 3, threadId: null });
+  await endpoint.requestCount(1);
+  // A new review normally supersedes the proposal; restore it to exercise the apply guard independently.
+  assert.equal(store.setProposalState(proposal.id, ["stale"], "proposed", null), true);
+  await assert.rejects(engine.propose(spec.id, [], "# Spec\n\nOther.\n", "change", "thr"), /review.*running|review finishes/i);
+  await assert.rejects(engine.applyProposal(proposal.id, proposal.baseHash, "ad-hoc-running"), /review.*running|review finishes/i);
+  assert.equal(store.getOperation("ad-hoc-running"), null);
+  assert.deepEqual(store.listFindings(spec.id), []);
+  engine.cancelRun(run.id);
+  await engine.settle();
+});
+
+test("an unfinished apply blocks ad hoc proposals and confirmed recovery starts a review", async () => {
+  const { root, engine, spec, store } = await setup([]);
+  const content = "# Spec\n\nRecovered ad hoc change.\n";
+  const proposal = await engine.propose(spec.id, [], content, "change", "thr");
+  const target = path.join(root, "docs/spec.md");
+  const backup = path.join(root, "docs/ad-hoc-backup");
+  await fs.copyFile(target, backup);
+  store.putApplyIntent({ proposalId: proposal.id, targetPath: target, backupPath: backup, stagedPath: path.join(root, "docs/ad-hoc-staged"), baseHash: proposal.baseHash, resultHash: sha256(content), createdAt: Date.now(), operationId: "ad-hoc-recovered" });
+  await assert.rejects(engine.propose(spec.id, [], "# Spec\n\nAnother change.\n", "other", "thr"), /unfinished apply/);
+  await fs.writeFile(target, content);
+  await engine.reconcile();
+  await engine.settle();
+  assert.equal(store.getProposal(proposal.id)!.state, "applied");
+  assert.ok(store.getOperation("ad-hoc-recovered"));
+  assert.deepEqual(store.listApplyIntents(), []);
+  assert.deepEqual(store.listFindings(spec.id), []);
+  const runs = store.listRuns(spec.id);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0]!.parentRunId, null);
+  assert.equal(runs[0]!.targetHash, sha256(content));
+});
+
+test("ad hoc apply defers re-review until existing findings are resolved", async () => {
+  const { engine, spec, store, endpoint, review } = await setup([{ content: FINDING("Gap A") + FINDING("Gap B") }]);
+  const prior = await review("implementation");
+  const [first, second] = store.listFindingsForRun(prior.id);
+  const content = "# Spec\n\nIndependent improvement.\n";
+  const proposal = await engine.propose(spec.id, [], content, "improve", "thr");
+  await engine.applyProposal(proposal.id, proposal.baseHash, "ad-hoc-deferred");
+  await engine.settle();
+  assert.equal(store.listRuns(spec.id).length, 1);
+  assert.equal(endpoint.requests.length, 1);
+  assert.equal(store.getFinding(first!.id)!.state, "open");
+  assert.equal(store.getFinding(second!.id)!.state, "open");
+
+  await engine.decide(first!.id, "dismiss", "not needed", "human", "deferred-first");
+  await engine.settle();
+  assert.equal(store.listRuns(spec.id).length, 1);
+  assert.equal(store.getFinding(second!.id)!.state, "open");
+  await engine.decide(second!.id, "dismiss", "not needed", "human", "deferred-second");
+  await engine.settle();
+  const runs = store.listRuns(spec.id);
+  assert.equal(runs.length, 2);
+  const fresh = runs.find((run) => run.id !== prior.id)!;
+  assert.equal(fresh.parentRunId, null);
+  assert.equal(fresh.targetHash, sha256(content));
+  assert.equal(endpoint.requests.length, 2);
+});
+
+test("deferred ad hoc reviews supersede older applied versions across reconciliation", async () => {
+  const { engine, spec, store, review, endpoint } = await setup([{ content: FINDING("Gap A") }]);
+  const prior = await review("implementation");
+  const finding = store.listFindingsForRun(prior.id)[0]!;
+  const first = await engine.propose(spec.id, [], "# Spec\n\nFirst change.\n", "first", "thr");
+  await engine.applyProposal(first.id, first.baseHash, "deferred-old");
+  const oldTask = store.getAdHocReviewTask(first.id)!;
+  const content = "# Spec\n\nSecond change.\n";
+  const second = await engine.propose(spec.id, [], content, "second", "thr");
+  await engine.applyProposal(second.id, second.baseHash, "deferred-new");
+  assert.equal(store.getAdHocReviewTask(first.id), null);
+  store.putAdHocReviewTask({ ...oldTask, createdAt: 1 });
+  await engine.reconcile();
+  await engine.decide(finding.id, "dismiss", "resolved", "human", "deferred-resolve");
+  await engine.settle();
+  const fresh = store.listRuns(spec.id).find((run) => run.id !== prior.id)!;
+  assert.equal(fresh.targetHash, sha256(content));
+  assert.equal(store.listPendingAdHocReviewTasks().length, 0);
+  await engine.reconcile();
+  await engine.settle();
+  assert.equal(store.listRuns(spec.id).length, 2);
+  assert.equal(endpoint.requests.length, 2);
+});
+
+test("a manual review consumes the deferred task across reconciliation", async () => {
+  const { engine, spec, store, review, endpoint } = await setup([{ content: FINDING("Old gap") }, { content: FINDING("New gap") }]);
+  const prior = await review("implementation");
+  const proposal = await engine.propose(spec.id, [], "# Spec\n\nManual target.\n", "change", "thr");
+  await engine.applyProposal(proposal.id, proposal.baseHash, "manual-deferred");
+  const manual = await engine.startRun(spec.id, { preset: "implementation", context: [], maxRounds: 3, threadId: null });
+  await engine.settle();
+  assert.equal(store.getAdHocReviewTask(proposal.id)!.runId, manual.id);
+  await engine.reconcile();
+  await engine.decide(store.listFindingsForRun(manual.id)[0]!.id, "dismiss", "resolved", "human", "manual-resolve");
+  await engine.settle();
+  await engine.reconcile();
+  await engine.settle();
+  assert.equal(store.listRuns(spec.id).length, 2);
+  assert.equal(endpoint.requests.length, 2);
+  assert.notEqual(prior.id, manual.id);
+});
+
+for (const terminal of ["failed", "cancelled"] as const) {
+  for (const recovered of [false, true]) {
+    test(`a ${recovered ? "recovered" : "confirmed"} partial fix advances a deferred review on a ${terminal} run`, async () => {
+      const { root, engine, spec, store, endpoint } = await setup([{ content: FINDING("Partial gap") + FINDING("Another gap") }, terminal === "failed" ? { toolCall: true } : { hang: true }]);
+      const run = await engine.startRun(spec.id, { preset: "feature_spec", context: [], maxRounds: 3, threadId: null });
+      if (terminal === "cancelled") { await endpoint.requestCount(2); engine.cancelRun(run.id); }
+      await engine.settle();
+      const original = store.getRun(run.id)!;
+      assert.equal(original.state, terminal);
+      const adHoc = await engine.propose(spec.id, [], "# Spec\n\nIndependent change.\n", "change", "thr");
+      await engine.applyProposal(adHoc.id, adHoc.baseHash, `defer-fix-${terminal}-${recovered}`);
+      const content = "# Spec\n\nIndependent change and finding fix.\n";
+      const fix = await engine.propose(spec.id, [store.listFindingsForRun(run.id)[0]!.id], content, "fix", "thr");
+      const op = `fix-${terminal}-${recovered}`;
+      if (recovered) {
+        const target = path.join(root, "docs/spec.md");
+        const backup = path.join(root, "docs/fix-backup");
+        await fs.copyFile(target, backup);
+        store.putApplyIntent({ proposalId: fix.id, targetPath: target, backupPath: backup, stagedPath: path.join(root, "docs/fix-staged"), baseHash: fix.baseHash, resultHash: fix.resultHash, createdAt: Date.now(), operationId: op });
+        await fs.writeFile(target, content);
+        await engine.reconcile();
+      } else await engine.applyProposal(fix.id, fix.baseHash, op);
+      await engine.settle();
+      assert.equal(store.listRuns(spec.id).length, 1);
+      assert.equal(store.getAdHocReviewTask(adHoc.id)!.targetHash, sha256(content));
+      await engine.decide(store.listFindingsForRun(run.id).find((finding) => finding.state === "open")!.id, "dismiss", "resolved", "human", `remaining-${terminal}-${recovered}`);
+      await engine.settle();
+      assert.equal(store.listRuns(spec.id).length, 2);
+      assert.equal(store.listRuns(spec.id).find((candidate) => candidate.id !== run.id)!.targetHash, sha256(content));
+      assert.equal(store.getRun(run.id)!.state, terminal);
+      assert.equal(store.getRun(run.id)!.stateReason, original.stateReason);
+      assert.ok(store.getOperation(op));
+      await engine.applyProposal(fix.id, fix.baseHash, op);
+      await engine.reconcile();
+      await engine.settle();
+      assert.equal(store.listRuns(spec.id).length, 2);
+    });
+  }
+}
+
+for (const terminal of ["failed", "cancelled"] as const) {
+  test(`resolving a partial finding on a ${terminal} run releases a deferred ad hoc review`, async () => {
+    const { engine, spec, store, endpoint } = await setup([{ content: FINDING("Partial gap") }, terminal === "failed" ? { toolCall: true } : { hang: true }]);
+    const run = await engine.startRun(spec.id, { preset: "feature_spec", context: [], maxRounds: 3, threadId: null });
+    if (terminal === "cancelled") {
+      await endpoint.requestCount(2);
+      engine.cancelRun(run.id);
+    }
+    await engine.settle();
+    const original = store.getRun(run.id)!;
+    assert.equal(original.state, terminal);
+    const finding = store.listFindingsForRun(run.id)[0]!;
+    const content = "# Spec\n\nIndependent change.\n";
+    const proposal = await engine.propose(spec.id, [], content, "change", "thr");
+    await engine.applyProposal(proposal.id, proposal.baseHash, `partial-${terminal}`);
+    await engine.decide(finding.id, "dismiss", "resolved", "human", `resolve-${terminal}`);
+    await engine.settle();
+    const fresh = store.listRuns(spec.id).find((candidate) => candidate.id !== run.id)!;
+    assert.equal(fresh.targetHash, sha256(content));
+    assert.equal(store.getRun(run.id)!.state, terminal);
+    assert.equal(store.getRun(run.id)!.stateReason, original.stateReason);
+  });
+}

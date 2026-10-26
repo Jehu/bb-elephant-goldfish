@@ -236,7 +236,7 @@ export class Engine {
 
   // --- runs --------------------------------------------------------------
 
-  async startRun(specId: string, options: StartOptions, parentRunId: string | null = null): Promise<Run> {
+  async startRun(specId: string, options: StartOptions, parentRunId: string | null = null, adHocProposalId: string | null = null): Promise<Run> {
     const { store } = this.deps;
     const spec = store.getSpec(specId);
     if (!spec) throw new EngineError("Unknown spec.");
@@ -256,6 +256,10 @@ export class Engine {
       const root = await this.root(spec.projectId);
       const file = await readInside(root, spec.path);
       if ("missing" in file) throw new EngineError(`The spec file is missing: ${spec.path}`);
+      if (adHocProposalId) {
+        const task = store.getAdHocReviewTask(adHocProposalId);
+        if (!task || task.runId || file.hash !== task.targetHash) throw new EngineError("The applied version changed before its automatic review could start.");
+      }
       if (parentRunId) {
         const applied = store.listProposals(spec.id).filter((p) => p.runId === parentRunId && p.state === "applied")
           .sort((a, b) => (a.appliedAt ?? 0) - (b.appliedAt ?? 0));
@@ -292,6 +296,8 @@ export class Engine {
       const plans = presetStages(options.preset, options.lenses, options.standard);
       store.transaction(() => {
         store.insertRun(run);
+        if (adHocProposalId && !store.associateAdHocReviewRun(adHocProposalId, runId)) throw new EngineError("Automatic review was already started.");
+        if (!adHocProposalId) store.associateMatchingAdHocReviewRuns(spec.id, file.hash, runId);
         // A new round supersedes older unresolved findings and proposals.
         for (const waiting of store.listRuns(spec.id).filter((r) => r.id !== run.id && r.state === "awaiting_decisions")) {
           store.setRunState(waiting.id, ["awaiting_decisions"], "stale", "superseded by a new review", true);
@@ -622,15 +628,18 @@ export class Engine {
   }
 
   /**
-   * Elephant: propose a full new version of the spec addressing findings.
+   * Elephant: propose a full new version of the spec, with or without findings.
    * The proposal is bound to the exact content it was computed against.
    */
   async propose(specId: string, findingIds: string[], newContent: string, summary: string, author: string): Promise<Proposal> {
     const { store } = this.deps;
     const spec = store.getSpec(specId);
     if (!spec) throw new EngineError("Unknown spec.");
-    if (findingIds.length === 0) throw new EngineError("A proposal must address at least one finding.");
     return this.withLock(spec.id, async () => {
+      if (this.pendingProposals(spec.id).length) throw new EngineError("A proposal has an unfinished apply; restart reconciliation is required.");
+      if (!findingIds.length && store.listRuns(spec.id).some((run) => run.state === "running")) {
+        throw new EngineError("Wait until the review finishes before proposing an ad hoc change.");
+      }
       const root = await this.root(spec.projectId);
       const file = await readInside(root, spec.path);
       if ("missing" in file) throw new EngineError(`The spec file is missing: ${spec.path}`);
@@ -639,6 +648,7 @@ export class Engine {
       let runId: string | null = null;
       for (const f of findings) {
         if (!f || f.specId !== spec.id) throw new EngineError("Every finding must belong to this spec.");
+        if (runId !== null && f.runId !== runId) throw new EngineError("Every finding must belong to the same review run.");
         if (this.pendingProposals(spec.id).some((proposal) => proposal.findingIds.includes(f.id))) {
           throw new EngineError("This proposal has an unfinished apply; restart reconciliation is required.");
         }
@@ -710,6 +720,9 @@ export class Engine {
       const proposal = store.getProposal(proposalId);
       if (!proposal) throw new EngineError("Unknown proposal.");
       if (proposal.state !== "proposed") throw new EngineError(`This proposal is ${proposal.state}.`);
+      if (!proposal.findingIds.length && store.listRuns(proposal.specId).some((run) => run.state === "running")) {
+        throw new EngineError("Wait until the review finishes before applying an ad hoc change.");
+      }
       if (proposal.findingIds.some((id) => {
         const finding = store.getFinding(id);
         return finding && store.getRun(finding.runId)?.state === "running";
@@ -736,6 +749,8 @@ export class Engine {
         store.deleteApplyIntent(proposalId);
         if (outcome.kind === "applied") {
           for (const id of proposal.findingIds) store.setFindingState(id, "fixed");
+          if (!proposal.runId) this.recordAdHocReview(spec, proposal);
+          else store.advancePendingAdHocReviewTasks(spec.id, proposal.baseHash, proposal.resultHash);
         } else {
           this.releaseStaleFindings(spec.id);
         }
@@ -745,9 +760,44 @@ export class Engine {
       });
       this.event(spec, proposal.runId, `proposal.${result.state}`, result.stateReason ?? `Proposal ${proposalId} applied`);
       if (outcome.kind === "applied" && proposal.runId) await this.afterResolution(spec, proposal.runId);
+      if (outcome.kind === "applied" && !proposal.runId) this.scheduleAdHocReview(spec, proposal.id);
       this.deps.changed(spec.projectId, spec.id);
       return result;
     });
+  }
+
+  private recordAdHocReview(spec: SpecRecord, proposal: Proposal): void {
+    const { store } = this.deps;
+    const latest = store.listRuns(spec.id)[0];
+    const stages = latest ? store.listStages(latest.id) : [];
+    const options: StartOptions = latest ? {
+      preset: latest.preset, context: latest.context, maxRounds: latest.maxRounds, threadId: latest.threadId,
+      ...(latest.preset === "custom" ? { lenses: stages.map((stage) => stage.lens), standard: stages[0]?.standard } : {}),
+    } : { preset: "full", context: [], maxRounds: 3, threadId: proposal.author || null };
+    store.deleteOtherPendingAdHocReviewTasks(spec.id, proposal.id);
+    store.putAdHocReviewTask({ proposalId: proposal.id, targetHash: proposal.resultHash, options, createdAt: Date.now() });
+  }
+
+  private scheduleAdHocReview(spec: SpecRecord, proposalId: string): void {
+    const task = this.deps.store.getAdHocReviewTask(proposalId);
+    if (this.deps.store.listFindings(spec.id).some((finding) => UNRESOLVED_FINDING_STATES.includes(finding.state))) return;
+    if (!task || task.runId) return;
+    this.track(Promise.resolve().then(() => this.startRun(spec.id, task.options, null, proposalId)).catch((cause: unknown) => {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      this.event(spec, null, "proposal.review_failed", `Automatic review could not start: ${message}`);
+      this.deps.changed(spec.projectId, spec.id);
+    }));
+  }
+
+  private async currentPendingAdHocReview(spec: SpecRecord) {
+    const { store } = this.deps;
+    const tasks = store.listPendingAdHocReviewTasks().filter((task) => store.getProposal(task.proposalId)?.specId === spec.id);
+    if (!tasks.length) return null;
+    const file = await readInside(await this.root(spec.projectId), spec.path);
+    if ("missing" in file) return null;
+    const task = tasks.findLast((candidate) => candidate.targetHash === file.hash) ?? null;
+    if (task) store.deleteOtherPendingAdHocReviewTasks(spec.id, task.proposalId);
+    return task;
   }
 
   /**
@@ -759,9 +809,18 @@ export class Engine {
     const run = store.getRun(runId);
     if (!run) return;
     await this.writeSummary(spec, run);
-    if (run.state !== "awaiting_decisions") return;
     const findings = store.listFindingsForRun(runId);
     if (findings.some((f) => UNRESOLVED_FINDING_STATES.includes(f.state))) return;
+    const pendingAdHoc = await this.currentPendingAdHocReview(spec);
+    if (pendingAdHoc) {
+      if (run.state === "awaiting_decisions") {
+        store.setRunState(runId, ["awaiting_decisions"], "stale", "document changed by an ad hoc proposal; a fresh review is scheduled", true);
+        await this.writeSummary(spec, store.getRun(runId)!);
+      }
+      this.scheduleAdHocReview(spec, pendingAdHoc.proposalId);
+      return;
+    }
+    if (run.state !== "awaiting_decisions") return;
     const applied = store.listProposals(spec.id).some((p) => p.runId === runId && p.state === "applied");
     if (!applied) {
       store.setRunState(runId, ["awaiting_decisions"], "completed", "all findings decided; nothing was changed", true);
@@ -838,6 +897,11 @@ export class Engine {
           if (!store.setProposalState(proposal.id, ["proposed", "stale"], "applied", result.reason, { appliedAt: Date.now(), backupPath: intent.backupPath })) {
             throw new EngineError("Proposal state changed during reconciliation; the apply intent was retained.");
           }
+          if (!proposal.runId) {
+            const spec = store.getSpec(proposal.specId);
+            if (spec) this.recordAdHocReview(spec, proposal);
+          }
+          else store.advancePendingAdHocReviewTasks(proposal.specId, proposal.baseHash, proposal.resultHash);
           for (const id of proposal.findingIds) {
             const finding = store.getFinding(id);
             if (finding && ((finding.proposalId === proposal.id && finding.state === "proposal_pending") || (finding.proposalId === null && finding.state === "fix_requested"))) store.setFindingState(id, "fixed");
@@ -882,6 +946,15 @@ export class Engine {
         !store.listRuns(spec.id).some((child) => child.parentRunId === run.id)) {
         this.scheduleContinuation(spec, run);
       }
+    }
+    const pendingSpecs = new Set(store.listPendingAdHocReviewTasks().map((task) => store.getProposal(task.proposalId)?.specId).filter((id): id is string => !!id));
+    for (const specId of pendingSpecs) {
+      const spec = store.getSpec(specId);
+      if (!spec) continue;
+      await this.withLock(spec.id, async () => {
+        const task = await this.currentPendingAdHocReview(spec);
+        if (task) this.scheduleAdHocReview(spec, task.proposalId);
+      });
     }
   }
 

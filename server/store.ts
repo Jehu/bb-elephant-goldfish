@@ -130,6 +130,13 @@ export const MIGRATIONS: string[] = [
     created_at INTEGER NOT NULL
   )`,
   `ALTER TABLE apply_intents ADD COLUMN operation_id TEXT`,
+  `CREATE TABLE ad_hoc_review_tasks (
+    proposal_id TEXT PRIMARY KEY REFERENCES proposals(id) ON DELETE CASCADE,
+    target_hash TEXT NOT NULL,
+    options_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    run_id TEXT REFERENCES runs(id)
+  )`,
 ];
 
 export const newId = (): string => randomUUID().replace(/-/g, "").slice(0, 24);
@@ -216,6 +223,39 @@ export type ApplyIntent = {
   createdAt: number;
   operationId?: string | null;
 };
+
+export type AdHocReviewOptions = {
+  preset: PresetId;
+  lenses?: LensId[];
+  standard?: StandardId;
+  context: string[];
+  maxRounds: number;
+  threadId: string | null;
+};
+
+export type AdHocReviewTask = {
+  proposalId: string;
+  targetHash: string;
+  options: AdHocReviewOptions;
+  createdAt: number;
+  runId: string | null;
+};
+
+type AdHocReviewTaskRow = {
+  proposal_id: string;
+  target_hash: string;
+  options_json: string;
+  created_at: number;
+  run_id: string | null;
+};
+
+const adHocReviewTaskFromRow = (r: AdHocReviewTaskRow): AdHocReviewTask => ({
+  proposalId: r.proposal_id,
+  targetHash: r.target_hash,
+  options: JSON.parse(r.options_json) as AdHocReviewOptions,
+  createdAt: r.created_at,
+  runId: r.run_id,
+});
 
 /** A spec row without the live file facts the RPC layer adds. */
 export type SpecRecord = { id: string; projectId: string; path: string; title: string; createdAt: number };
@@ -705,6 +745,53 @@ export class Store {
         createdAt: r.created_at,
         operationId: r.operation_id,
       }));
+  }
+
+  // --- ad hoc review tasks -----------------------------------------------
+
+  putAdHocReviewTask(task: Omit<AdHocReviewTask, "runId">): void {
+    this.db
+      .prepare(
+        `INSERT INTO ad_hoc_review_tasks (proposal_id, target_hash, options_json, created_at)
+         VALUES (?, ?, ?, ?) ON CONFLICT(proposal_id) DO NOTHING`,
+      )
+      .run(task.proposalId, task.targetHash, JSON.stringify(task.options), task.createdAt);
+  }
+
+  getAdHocReviewTask(proposalId: string): AdHocReviewTask | null {
+    const row = this.db
+      .prepare<[string], AdHocReviewTaskRow>("SELECT * FROM ad_hoc_review_tasks WHERE proposal_id = ?")
+      .get(proposalId);
+    return row ? adHocReviewTaskFromRow(row) : null;
+  }
+
+  listPendingAdHocReviewTasks(): AdHocReviewTask[] {
+    return this.db
+      .prepare<[], AdHocReviewTaskRow>("SELECT * FROM ad_hoc_review_tasks WHERE run_id IS NULL ORDER BY created_at, proposal_id")
+      .all()
+      .map(adHocReviewTaskFromRow);
+  }
+
+  deleteOtherPendingAdHocReviewTasks(specId: string, proposalId: string): void {
+    this.db.prepare(`DELETE FROM ad_hoc_review_tasks WHERE run_id IS NULL AND proposal_id != ?
+      AND proposal_id IN (SELECT id FROM proposals WHERE spec_id = ?)`).run(proposalId, specId);
+  }
+
+  advancePendingAdHocReviewTasks(specId: string, baseHash: string, resultHash: string): void {
+    this.db.prepare(`UPDATE ad_hoc_review_tasks SET target_hash = ? WHERE run_id IS NULL AND target_hash = ?
+      AND proposal_id IN (SELECT id FROM proposals WHERE spec_id = ?)`).run(resultHash, baseHash, specId);
+  }
+
+  associateMatchingAdHocReviewRuns(specId: string, targetHash: string, runId: string): void {
+    this.db.prepare(`UPDATE ad_hoc_review_tasks SET run_id = ? WHERE run_id IS NULL AND target_hash = ?
+      AND proposal_id IN (SELECT id FROM proposals WHERE spec_id = ?)`).run(runId, targetHash, specId);
+  }
+
+  /** Call in the same transaction as inserting the run and its stages. */
+  associateAdHocReviewRun(proposalId: string, runId: string): boolean {
+    return this.db
+      .prepare("UPDATE ad_hoc_review_tasks SET run_id = ? WHERE proposal_id = ? AND run_id IS NULL")
+      .run(runId, proposalId).changes > 0;
   }
 
   // --- events ------------------------------------------------------------

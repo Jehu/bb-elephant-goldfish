@@ -25,7 +25,8 @@ spec changes for the Elephant Goldfish BB plugin.
   including their operation receipts; an unknown outcome retains the backup and
   releases findings still attached to that proposal. External editors are not
   locked and may race with or overwrite the replacement.
-- Proposals must address at least one finding. An outstanding apply intent blocks
+- A proposal may address no findings; if it addresses findings, they must all
+  belong to the same review run. An outstanding apply intent blocks
   any other apply for the spec, rejection, decisions and reproposals of its
   original findings, new reviews, and forgetting the spec; refresh preserves its
   proposal and finding ownership. Conflict resolution releases its findings for
@@ -43,7 +44,10 @@ spec changes for the Elephant Goldfish BB plugin.
 - Append SQLite migrations; never alter or reorder shipped migrations.
 - Specs/reports remain Markdown; SQLite is the durable workflow index.
 - Elephant tools must only access specs and findings owned by their invoking
-  project; requests to the Elephant must target the run's launching thread.
+  project. Composer requests are drafts only; the human sends them.
+- Workspace search resolves the thread environment and returns confined regular
+  files only when its host and checkout match the server-local project root.
+  Missing or mismatched workspaces and search failures are reported, not guessed.
 
 ## Work Guidance
 

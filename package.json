@@ -11,7 +11,10 @@
     "name": "Elephant Goldfish",
     "description": "Spec workspace for the Elephant-Goldfish Model: Markdown specs, fresh-context Goldfish reviews, human-approved changes.",
     "branding": {
-      "icon": "FileCheck"
+      "icon": "./icons/elephant-goldfish.svg",
+      "experimental_icons": {
+        "elephant-goldfish": "./icons/elephant-goldfish.svg"
+      }
     },
     "server": "./server.ts",
     "app": "./app.tsx",

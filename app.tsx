@@ -5,7 +5,7 @@
 // - "Elephant Goldfish" tab beside a thread: draft requests for that thread.
 // Decisions and applying a proposal happen only here, by the human.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import {
   Markdown,
   definePluginApp,
@@ -121,15 +121,46 @@ const STANDARD_LABEL: Record<StandardId, string> = {
   "re-implementation-standard": "Re-implementation",
 };
 
+type MarkVariant = "split" | "elephant" | "goldfish";
+
+/** Exact role-mark geometry from upstream Mark.astro at the repository pin. */
+function Mark({ variant = "split", label, className }: { variant?: MarkVariant; label?: string; className?: string }) {
+  const labelled = Boolean(label);
+  const viewBox = variant === "elephant" ? "1.6 6.8 10.4 10.4" : variant === "goldfish" ? "12.5 6.8 10.4 10.4" : "1.5 1.5 21 21";
+  return (
+    <svg viewBox={viewBox} className={cn("size-5 shrink-0", className)} role={labelled ? "img" : undefined} aria-label={label} aria-hidden={labelled ? undefined : true}>
+      {(variant === "split" || variant === "elephant") && <g>
+        <path d="M10.30,6.80 A5.20,5.20 0 0 0 10.30,17.20 A1.20,1.20 0 0 0 11.50,16.00 L11.50,8.00 A1.20,1.20 0 0 0 10.30,6.80Z" fill="var(--egm-color-elephant)" />
+        <path d="M7.20,12.00 C6.80,14.60 3.40,14.70 3.20,12.60 C3.10,11.20 3.30,10.20 3.60,9.40" fill="none" stroke="var(--egm-color-elephant)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+      </g>}
+      {(variant === "split" || variant === "goldfish") && <g>
+        <path d="M13.70,6.80 A5.20,5.20 0 0 1 13.70,17.20 A1.20,1.20 0 0 1 12.50,16.00 L12.50,8.00 A1.20,1.20 0 0 1 13.70,6.80Z" fill="var(--egm-color-goldfish)" />
+        <path d="M16.80,12.00 L18.00,12.00 C18.80,12.00 19.40,10.60 20.90,9.40 M18.00,12.00 C18.80,12.00 19.40,13.40 20.90,14.60" fill="none" stroke="var(--egm-color-goldfish)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+      </g>}
+    </svg>
+  );
+}
+
+function HostMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="1.5 1.5 21 21" className={className} fill="none" aria-hidden="true">
+      <path d="M10.30,6.80 A5.20,5.20 0 0 0 10.30,17.20 A1.20,1.20 0 0 0 11.50,16.00 L11.50,8.00 A1.20,1.20 0 0 0 10.30,6.80Z" fill="currentColor" />
+      <path d="M7.20,12.00 C6.80,14.60 3.40,14.70 3.20,12.60 C3.10,11.20 3.30,10.20 3.60,9.40" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M13.70,6.80 A5.20,5.20 0 0 1 13.70,17.20 A1.20,1.20 0 0 1 12.50,16.00 L12.50,8.00 A1.20,1.20 0 0 1 13.70,6.80Z" fill="currentColor" />
+      <path d="M16.80,12.00 L18.00,12.00 C18.80,12.00 19.40,10.60 20.90,9.40 M18.00,12.00 C18.80,12.00 19.40,13.40 20.90,14.60" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function Badge({ className, children }: { className?: string; children: ReactNode }) {
   return <span className={cn("inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium", className)}>{children}</span>;
 }
 
-function Section({ title, children, actions }: { title: string; children: ReactNode; actions?: ReactNode }) {
+function Section({ title, children, actions }: { title: ReactNode; children: ReactNode; actions?: ReactNode }) {
   return (
-    <section className="space-y-2">
+    <section className="space-y-2 border-t pt-5 first:border-t-0 first:pt-0">
       <div className="flex items-center justify-between gap-2">
-        <h3 className="text-sm font-semibold">{title}</h3>
+        <h3 className="text-sm font-semibold tracking-tight">{title}</h3>
         {actions}
       </div>
       {children}
@@ -162,7 +193,8 @@ function ReviewerBanner({ status }: { status: ReviewerStatus | null }) {
   const engine = status.engine === "bb" ? "BB" : "Goldfish";
   if (status.ready) {
     return (
-      <p className="text-xs text-muted-foreground">
+      <p className="flex items-center gap-1 text-xs text-muted-foreground">
+        <Mark variant="goldfish" className="size-3.5" />
         {engine}: <span className="font-mono">{status.model ?? "default model"}</span> — {status.engine === "bb" ? "ready; fresh BB worker per stage; can run tools, subject only to BB's permissions." : "ready; fresh context, no tools, read-only."}
       </p>
     );
@@ -211,7 +243,7 @@ function GuidedRequest({ threadId, onDraft }: { threadId: string; onDraft: Draft
     work: "Use the Elephant workflow to work on the selected existing document and the stated goal. Propose changes for human review rather than directly editing the document.",
   };
   return (
-    <Section title="Start with Elephant">
+    <Section title={<span className="flex items-center gap-1.5"><Mark variant="elephant" className="size-4" />Start with Elephant</span>}>
       <p className="text-xs text-muted-foreground">Prepare a request in this thread's composer. You review and send it yourself.</p>
       <div className="flex flex-wrap gap-2">
         {([['brainstorm', 'Brainstorm an idea'], ['draft', 'Draft a spec'], ['work', 'Work on a document']] as const).map(([id, label]) => (
@@ -332,7 +364,13 @@ function SpecList({ projectId, onOpen }: { projectId: string; onOpen: (specId: s
       {specs === null ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : specs.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No specs yet. Add a Markdown file, or ask the agent to use an egm skill.</p>
+        <div className="flex items-start gap-3 rounded-md bg-muted/35 p-3">
+          <Mark variant="goldfish" className="mt-0.5 size-5" />
+          <div className="space-y-1">
+            <p className="text-sm font-medium">No specs yet</p>
+            <p className="text-sm text-muted-foreground">Add the Markdown file you want Goldfish to review using the existing field below.</p>
+          </div>
+        </div>
       ) : (
         <ul className="divide-y divide-border rounded-md border">
           {specs.map((spec) => (
@@ -391,69 +429,34 @@ function StartReview({ spec, threadId, reviewer }: { spec: Spec; threadId: strin
     }
   };
   return (
-    <div className="space-y-2 rounded-md border p-3">
+    <div className="space-y-3 rounded-md bg-muted/35 p-3">
       <div className="flex flex-wrap gap-2">
         {PRESETS.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            title={p.hint}
-            aria-pressed={preset === p.id}
-            onClick={() => setPreset(p.id)}
-            className={cn(
-              "rounded-md border px-2 py-1 text-xs",
-              preset === p.id ? "border-foreground bg-foreground text-background" : "hover:bg-state-hover",
-            )}
-          >
+          <button key={p.id} type="button" title={p.hint} aria-pressed={preset === p.id} onClick={() => setPreset(p.id)} className={cn("rounded-md border px-2 py-1 text-xs", preset === p.id ? "border-foreground bg-foreground text-background" : "hover:bg-state-hover")}>
             {p.label}
           </button>
         ))}
       </div>
       <p className="text-xs text-muted-foreground">{PRESETS.find((p) => p.id === preset)?.hint}</p>
-      {preset === "custom" && (
-        <div className="space-y-2">
-          <fieldset className="flex flex-wrap gap-x-3 gap-y-1">
-            <legend className="text-xs font-medium">Reviewers</legend>
-            {(Object.keys(LENS_LABEL) as LensId[]).map((lens) => (
-              <label key={lens} className="flex items-center gap-1 text-xs">
-                <input
-                  type="checkbox"
-                  checked={lenses.includes(lens)}
-                  onChange={(e) => {
-                    const checked = e.target.checked;
-                    setLenses((current) => checked ? [...current, lens] : current.filter((item) => item !== lens));
-                  }}
-                />
-                {LENS_LABEL[lens]}
-              </label>
-            ))}
-          </fieldset>
-          {lenses.length === 0 && <p className="text-xs text-muted-foreground">Select at least one reviewer.</p>}
-          <label className="flex items-center gap-2 text-xs">
-            Standard
-            <select className="rounded-md border bg-transparent px-2 py-1" value={standard} onChange={(e) => setStandard(e.target.value as StandardId)}>
-              {(Object.keys(STANDARD_LABEL) as StandardId[]).map((id) => <option key={id} value={id}>{STANDARD_LABEL[id]}</option>)}
-            </select>
-          </label>
-        </div>
-      )}
-      <Input
-        value={context}
-        onChange={(e) => setContext(e.target.value)}
-        placeholder="Context files for the reviewers, comma-separated (optional)"
-        aria-label="Context files"
-      />
+      {preset === "custom" && <div className="space-y-2">
+        <fieldset className="flex flex-wrap gap-x-3 gap-y-1">
+          <legend className="text-xs font-medium">Reviewers</legend>
+          {(Object.keys(LENS_LABEL) as LensId[]).map((lens) => <label key={lens} className="flex items-center gap-1 text-xs">
+            <input type="checkbox" checked={lenses.includes(lens)} onChange={(e) => setLenses((current) => e.target.checked ? [...current, lens] : current.filter((item) => item !== lens))} />
+            {LENS_LABEL[lens]}
+          </label>)}
+        </fieldset>
+        {lenses.length === 0 && <p className="text-xs text-muted-foreground">Select at least one reviewer.</p>}
+        <label className="flex items-center gap-2 text-xs">Standard
+          <select className="rounded-md border bg-transparent px-2 py-1" value={standard} onChange={(e) => setStandard(e.target.value as StandardId)}>
+            {(Object.keys(STANDARD_LABEL) as StandardId[]).map((id) => <option key={id} value={id}>{STANDARD_LABEL[id]}</option>)}
+          </select>
+        </label>
+      </div>}
+      <Input value={context} onChange={(e) => setContext(e.target.value)} placeholder="Context files for the reviewers, comma-separated (optional)" aria-label="Context files" />
       <div className="flex items-center gap-2">
-        <label className="flex items-center gap-1 text-xs text-muted-foreground">
-          Rounds at most
-          <Input
-            type="number"
-            min={1}
-            max={10}
-            value={maxRounds}
-            onChange={(e) => setMaxRounds(Math.min(10, Math.max(1, Number(e.target.value) || 1)))}
-            className="h-8 w-16"
-          />
+        <label className="flex items-center gap-1 text-xs text-muted-foreground">Rounds at most
+          <Input type="number" min={1} max={10} value={maxRounds} onChange={(e) => setMaxRounds(Math.min(10, Math.max(1, Number(e.target.value) || 1)))} className="h-8 w-16" />
         </label>
         <Button size="sm" disabled={disabled} onClick={requestStart}>Start {engineLabel} review</Button>
       </div>
@@ -472,11 +475,10 @@ function StartReview({ spec, threadId, reviewer }: { spec: Spec; threadId: strin
     </div>
   );
 }
-
 function RunCard({ run, stages, onCancel }: { run: Run; stages: Stage[]; onCancel: () => void }) {
   const mine = stages.filter((s) => s.runId === run.id);
   return (
-    <div className="space-y-2 rounded-md border p-3">
+    <div className="space-y-2 border-l-2 border-l-border pl-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium">Round {run.round}</span>
         <Badge className={RUN_TONE[run.state]}>{RUN_LABEL[run.state]}</Badge>
@@ -576,7 +578,7 @@ function FindingCard({ finding, running, onDecide }: { finding: Finding; running
   const [open, setOpen] = useState(finding.state === "open" || finding.state === "contested");
   const decidable = ["open", "fix_requested", "contested"].includes(finding.state);
   return (
-    <div className="space-y-2 rounded-md border p-3">
+    <div className="space-y-2 border-b pb-3 last:border-b-0">
       <button type="button" className="flex w-full items-start gap-2 text-left" onClick={() => setOpen((v) => !v)}>
         <Badge className={SEVERITY_TONE[finding.severity]}>{finding.rawSeverity === "(none)" ? finding.severity : finding.rawSeverity}</Badge>
         <span className="flex-1 text-sm font-medium">{finding.title}</span>
@@ -592,8 +594,8 @@ function FindingCard({ finding, running, onDecide }: { finding: Finding; running
             <Markdown content={finding.body || "_No explanation given._"} />
           </div>
           {finding.elephantNote && (
-            <div className="rounded border-l-2 border-blue-500/60 bg-blue-500/5 px-2 py-1 text-sm">
-              <div className="text-xs font-medium text-blue-600 dark:text-blue-400">Elephant contests this</div>
+            <div className="rounded-md bg-[color:var(--egm-color-elephant-surface)] px-2 py-1 text-sm">
+              <div className="flex items-center gap-1 text-xs font-medium text-violet-700 dark:text-violet-400"><Mark variant="elephant" className="size-3" />Elephant contests this</div>
               <Markdown content={finding.elephantNote} />
             </div>
           )}
@@ -619,7 +621,7 @@ function ProposalCard({ proposal, path, running, onApply, onReject, onReviewDiff
   const [feedback, setFeedback] = useState("");
   const pending = proposal.state === "proposed";
   return (
-    <div className="space-y-2 rounded-md border p-3">
+    <div className="space-y-2 border-l-2 border-l-amber-500/50 pl-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium">Proposed change</span>
         <Badge
@@ -650,7 +652,7 @@ function ProposalCard({ proposal, path, running, onApply, onReject, onReviewDiff
       {pending && running && <p className="text-xs text-muted-foreground">Wait for this review to finish before applying or rejecting this change.</p>}
       {pending &&
         (confirming ? (
-          <div className="flex flex-wrap items-center gap-2 rounded border border-amber-500/40 bg-amber-500/5 p-2">
+          <div className="flex flex-wrap items-center gap-2 rounded-md bg-amber-500/10 p-2">
             <span className="text-sm">Write this change to {path}? The file must still be the version shown. Coordinate with other editors: concurrent writes are not locked and may be overwritten.</span>
             <Button
               size="sm"
@@ -737,12 +739,15 @@ function SpecDetail({ specId, threadId, onBack, onDraft }: { specId: string; thr
   const proposalInThread = (proposal: Proposal) => proposal.runId ? detail.runs.some((run) => run.id === proposal.runId && run.threadId === threadId) : threadId !== null && proposal.author === threadId;
 
   return (
-    <div className="space-y-5">
-      <div className="space-y-1">
+    <div className="space-y-6" style={{ "--egm-color-elephant": "#6d63a8", "--egm-color-elephant-ink": "#514889", "--egm-color-elephant-surface": "#6d63a81a", "--egm-color-goldfish": "#c96d2d" } as CSSProperties}>
+      <div className="space-y-1.5">
         <button type="button" className="text-xs text-muted-foreground hover:underline" onClick={onBack}>
           ← All specs
         </button>
-        <h2 className="text-lg font-semibold">{spec.title}</h2>
+        <div className="flex items-center gap-2">
+          <Mark label="Elephant Goldfish" className="size-6" />
+          <h2 className="text-lg font-semibold tracking-tight">{spec.title}</h2>
+        </div>
         <p className="font-mono text-xs text-muted-foreground">
           {spec.path} · {spec.currentHash ? `current version ${spec.currentHash.slice(0, 10)}` : "file missing"}
         </p>
@@ -785,7 +790,13 @@ function SpecDetail({ specId, threadId, onBack, onDraft }: { specId: string; thr
         </p>
         {onDraft && <p className="text-xs text-muted-foreground">Select up to 100 findings from one review run at a time.</p>}
         {visibleFindings.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{showResolved ? "No findings yet." : "Nothing waits for a decision."}</p>
+          <div className="flex items-start gap-3 rounded-md bg-muted/35 p-3">
+            <Mark variant="goldfish" className="mt-0.5 size-5" />
+            <div className="space-y-1">
+              <p className="text-sm font-medium">{showResolved ? "No findings yet" : "Nothing waits for a decision"}</p>
+              <p className="text-sm text-muted-foreground">{showResolved ? "Start a Goldfish review to see its findings here." : "Review open findings above, or start the existing Goldfish review when you are ready."}</p>
+            </div>
+          </div>
         ) : (
           <div className="space-y-2">
             {visibleFindings.map((f) => (
@@ -874,9 +885,12 @@ function ProjectPage() {
     );
   }, [rpc, contextProjectId]);
   return (
-    <div className="mx-auto max-w-4xl space-y-4 p-6">
-      <div className="space-y-1">
-        <h1 className="text-xl font-semibold">Spec workspace</h1>
+    <div className="mx-auto max-w-4xl space-y-5 p-6" style={{ "--egm-color-elephant": "#6d63a8", "--egm-color-elephant-ink": "#514889", "--egm-color-elephant-surface": "#6d63a81a", "--egm-color-goldfish": "#c96d2d" } as CSSProperties}>
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-2">
+          <Mark label="Elephant Goldfish" className="size-7" />
+          <h1 className="text-xl font-semibold tracking-tight">Spec workspace</h1>
+        </div>
         <p className="text-sm text-muted-foreground">
           Markdown specs, Goldfish reviews and your decisions. Changes reach a spec only after you confirm the diff.
         </p>
@@ -959,11 +973,14 @@ function ThreadTab({ threadId }: { threadId: string }) {
   useEffect(load, [load]);
   useRealtime(CHANGED, load);
   return (
-    <div className="space-y-4 p-4">
+    <div className="space-y-5 p-4" style={{ "--egm-color-elephant": "#6d63a8", "--egm-color-elephant-ink": "#514889", "--egm-color-elephant-surface": "#6d63a81a", "--egm-color-goldfish": "#c96d2d" } as CSSProperties}>
       <div className="flex items-center justify-between gap-2">
-        <p className="text-xs text-muted-foreground">
-          {active.length > 0 ? `${active.length} review(s) in progress or waiting for you` : "No review in progress"}
-        </p>
+        <div className="flex min-w-0 items-center gap-2">
+          <Mark label="Elephant Goldfish" className="size-5" />
+          <p className="truncate text-xs text-muted-foreground">
+            {active.length > 0 ? `${active.length} review(s) in progress or waiting for you` : "No review in progress"}
+          </p>
+        </div>
         <Button size="sm" variant="ghost" onClick={() => navigate.toPluginPanel("specs")}>
           Open full page
         </Button>
@@ -971,7 +988,7 @@ function ThreadTab({ threadId }: { threadId: string }) {
       <ErrorLine error={error} />
       <ErrorLine error={draftError} />
       {draftMessage && <p role="status" className="text-xs text-muted-foreground">{draftMessage}</p>}
-      {pending && pending.threadId === threadId && <div className="space-y-2 rounded-md border p-3"><p className="text-sm">The composer already has a draft. Append this request to its latest contents, or cancel without changing it?</p><div className="flex gap-2"><Button size="sm" onClick={() => void commitDraft(pending.threadId, pending.prompt, true, pending.contextual)}>Append</Button><Button size="sm" variant="ghost" onClick={() => { draftOperation.current?.abort(); setPending(null); setDraftError(null); }}>Cancel</Button></div></div>}
+      {pending && pending.threadId === threadId && <div className="space-y-2 rounded-md bg-muted/50 p-3"><p className="text-sm">The composer already has a draft. Append this request to its latest contents, or cancel without changing it?</p><div className="flex gap-2"><Button size="sm" onClick={() => void commitDraft(pending.threadId, pending.prompt, true, pending.contextual)}>Append</Button><Button size="sm" variant="ghost" onClick={() => { draftOperation.current?.abort(); setPending(null); setDraftError(null); }}>Cancel</Button></div></div>}
       <GuidedRequest key={threadId} threadId={threadId} onDraft={draft} />
       {projectId && <Workspace key={`workspace:${threadId}`} projectId={projectId} threadId={threadId} onDraft={draftContextual} />}
     </div>
@@ -979,17 +996,18 @@ function ThreadTab({ threadId }: { threadId: string }) {
 }
 
 export default definePluginApp((app) => {
+  app.experimental_icons.register({ name: "elephant-goldfish", component: HostMark });
   app.slots.navPanel({
     id: "specs",
     title: "Spec workspace",
-    icon: "FileText",
+    icon: "elephant-goldfish",
     path: "specs",
     component: ProjectPage,
   });
   app.slots.experimental_tab({
     id: "egm-thread",
     title: "Elephant Goldfish",
-    icon: "FileText",
+    icon: "elephant-goldfish",
     context: { kind: "thread" },
     availability: "fixed",
     layout: "flush",

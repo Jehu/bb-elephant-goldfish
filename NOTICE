@@ -18,6 +18,9 @@ personas and standards to assemble tool-less review requests.
 
 Changes from upstream include tool-less OpenAI-compatible reviewer dispatch,
 explicit human diff approval, durable version-bound review state and automatic
-next rounds after confirmed changes. These adaptations are not endorsed by
 Google or the upstream authors. No upstream NOTICE file was present at the
 pinned commit.
+
+The static role-mark geometry in `app.tsx` is transcribed from
+`site/src/components/Mark.astro` at that same pinned commit. The compact
+monochrome host icon is an adaptation of the combined upstream geometry.

@@ -5,6 +5,8 @@ A spec workspace for [BB](https://getbb.app), adapting Google's
 (EGM). Markdown specs stay in your checkout. A project page and a thread tab
 show reviews, findings, decisions and proposed changes together.
 
+[![Elephant Goldfish workspace showing review findings and a proposed spec change awaiting confirmation](screenshots/elephant-goldfish/spec-detail.png)](screenshots/elephant-goldfish/spec-detail.png)
+
 Long-form description for the BB Community marketplace: [PLUGIN_OVERVIEW.md](PLUGIN_OVERVIEW.md),
 with current UI screenshots under [screenshots/](screenshots/).
 

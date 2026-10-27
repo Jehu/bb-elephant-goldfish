@@ -23,6 +23,7 @@ import {
   type StandardId,
 } from "./contract.ts";
 import { unifiedDiff } from "./diff.ts";
+import { ENDPOINT_CHANGED, normalizeBaseUrl } from "./goldfish.ts";
 import type { GoldfishClient, GoldfishMessage, GoldfishResult } from "./goldfish.ts";
 import { parseFindings, presetStages, stageMessages, type ContextFile } from "./prompts.ts";
 import { newId, type SpecRecord, type Store } from "./store.ts";
@@ -51,6 +52,8 @@ export type EngineDeps = {
   store: Store;
   goldfish: ReviewEngine;
   reviewer?: () => ReviewEngine;
+  /** Project that owns a BB thread, or null when it no longer exists. */
+  threadProject(threadId: string): Promise<string | null>;
   /** Absolute workspace root of a project on this BB server, or null. */
   projectRoot(projectId: string): Promise<string | null>;
   /** Tell open views something changed. */
@@ -287,10 +290,20 @@ export class Engine {
       const runId = newId();
       const stem = spec.path.replace(/\.md$/i, "").replaceAll("/", "__");
       const engine = options.reviewer?.engine ?? this.deps.reviewer?.().engine ?? this.deps.goldfish.engine;
+      if (engine === "bb" && options.threadId && await this.deps.threadProject(options.threadId) !== spec.projectId) {
+        throw new EngineError("thread no longer belongs to this project");
+      }
       const reviewer = engine === "bb" ? this.deps.reviewer?.() : this.deps.goldfish;
       if (!reviewer) throw new EngineError(`No ${engine} reviewer is available.`);
       const reviewerStatus = await reviewer.status();
       if (!reviewerStatus.ready) throw new EngineError(`${engine === "bb" ? "BB" : "Goldfish"} review is unavailable: ${reviewerStatus.reason}`);
+      if (engine === "goldfish" && options.reviewer?.provider) {
+        const pinned = normalizeBaseUrl(options.reviewer.provider);
+        const live = reviewerStatus.endpoint ? normalizeBaseUrl(reviewerStatus.endpoint) : null;
+        // Continuations and tool-driven starts pin the endpoint the first round used;
+        // a different live endpoint must fail here, not silently pair with the live key.
+        if (pinned && live && pinned !== live) throw new EngineError(ENDPOINT_CHANGED);
+      }
       if (engine === "bb" && !store.hasReviewerConsent()) throw new EngineError("BB reviewer consent was revoked; allow BB workers again in the Elephant Goldfish tab before launching.");
       const run: Run = {
         id: runId,

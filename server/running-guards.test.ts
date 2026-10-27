@@ -62,6 +62,7 @@ async function setup(replies: Reply[]) {
       async () => ({ baseUrl: "http://fake/v1", model: "m", apiKey: "k", timeoutMs: 5000 }),
       endpoint.fetchImpl,
     ),
+    threadProject: async () => "proj",
     projectRoot: async () => root,
     changed: () => {},
     log: { info: () => {}, warn: () => {} },

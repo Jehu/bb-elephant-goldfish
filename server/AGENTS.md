@@ -24,6 +24,10 @@ spec changes for the Elephant Goldfish BB plugin.
   persist each worker ID for stop/archive cleanup and restart reconciliation.
 - Runs select their reviewer engine at launch and continuations retain that
   selection; never silently fall back between BB workers and the endpoint.
+- An endpoint key is only ever sent to the currently configured endpoint; runs
+  pinned to another endpoint fail visibly ("endpoint changed") instead of
+  combining a stored endpoint with the live key. Response bodies from endpoint
+  errors are never persisted or rendered; errors carry the HTTP status only.
 - Confirmed proposal apply checks the base version, retains a backup, atomically
   replaces the target and checks the result. Restart reconciles apply intents,
   including their operation receipts; an unknown outcome retains the backup and

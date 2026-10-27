@@ -14,7 +14,7 @@ import { sha256 } from "./workspace.ts";
  * `gate`: the reply waits until the test opens it (and still honors abort).
  * `hang`: the reply waits until the request is aborted.
  */
-type Reply = { content?: string; status?: number; toolCall?: boolean; hang?: boolean; gate?: Promise<void> };
+type Reply = { content?: string; status?: number; body?: string; toolCall?: boolean; hang?: boolean; gate?: Promise<void> };
 
 /**
  * OpenAI-compatible fake: answers queued replies and records each request body.
@@ -34,7 +34,7 @@ function fakeEndpoint(replies: Reply[]) {
       if (reply.hang) return aborted.promise;
       await Promise.race([reply.gate, aborted.promise]);
     }
-    if (reply.status) return new Response("nope", { status: reply.status });
+    if (reply.status) return new Response(reply.body ?? "nope", { status: reply.status });
     const message = reply.toolCall
       ? { content: null, tool_calls: [{ id: "t", type: "function", function: { name: "write_file", arguments: "{}" } }] }
       : { content: reply.content };
@@ -44,7 +44,6 @@ function fakeEndpoint(replies: Reply[]) {
     );
   }) as typeof fetch;
   const requestCount = (n: number): Promise<void> => {
-    if (requests.length >= n) return Promise.resolve();
     const { promise, resolve } = Promise.withResolvers<void>();
     waiters.push({ n, resolve });
     return promise;
@@ -54,7 +53,7 @@ function fakeEndpoint(replies: Reply[]) {
 
 const FINDING = (title: string, severity = "major") => `### FINDING\nseverity: ${severity}\nlines: 1-2\ntitle: ${title}\nBecause reasons.\n`;
 
-async function setup(replies: Reply[], options: { configured?: boolean; bb?: () => ReviewEngine } = {}) {
+async function setup(replies: Reply[], options: { configured?: boolean; bb?: () => ReviewEngine; config?: () => Promise<{ baseUrl: string; model: string; apiKey: string; timeoutMs: number } | null>; threadProject?: (threadId: string) => Promise<string | null> } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "egm-eng-")));
   await fs.mkdir(path.join(root, "docs"), { recursive: true });
   await fs.writeFile(path.join(root, "docs/spec.md"), "# Spec\n\nFirst version.\n");
@@ -64,13 +63,14 @@ async function setup(replies: Reply[], options: { configured?: boolean; bb?: () 
   const store = new Store(db);
   const endpoint = fakeEndpoint(replies);
   const goldfish = new GoldfishClient(
-    async () => (options.configured === false ? null : { baseUrl: "http://fake/v1", model: "m", apiKey: "k", timeoutMs: 5000 }),
+    options.config ?? (async () => (options.configured === false ? null : { baseUrl: "http://fake/v1", model: "m", apiKey: "k", timeoutMs: 5000 })),
     endpoint.fetchImpl,
   );
   const engine = new Engine({
     store,
     goldfish,
     reviewer: options.bb,
+    threadProject: options.threadProject ?? (async () => "proj"),
     projectRoot: async () => root,
     changed: () => {},
     log: { info: () => {}, warn: () => {} },
@@ -499,10 +499,10 @@ test("restart reconciliation marks interrupted runs failed and keeps partial res
   const run = await engine.startRun(spec.id, { preset: "feature_spec", context: [], maxRounds: 3, threadId: null });
   // The first stage answers at once; wait until the second (hanging) stage is in flight.
   await endpoint.requestCount(2);
-  // A new engine on the same database models the plugin after a BB restart.
   const restarted = new Engine({
     store: new Store(db),
     goldfish: new GoldfishClient(async () => null),
+    threadProject: async () => "proj",
     projectRoot: async () => root,
     changed: () => {},
     log: { info: () => {}, warn: () => {} },
@@ -930,4 +930,130 @@ test("revoking BB consent blocks restart reconciliation continuations", async ()
   assert.match(failed.stateReason ?? "", /next round could not start: BB reviewer consent was revoked/);
   assert.equal(store.listRuns(spec.id).filter((child) => child.parentRunId === run.id).length, 0);
   assert.equal(bb.launches.length, 1);
+});
+
+test("a continuation whose BB thread moved projects fails without another worker", async () => {
+  let threadProject = "proj";
+  const bb = fakeBb([FINDING("Gap A")]);
+  const { engine, spec, store } = await setup([], { bb: bb.reviewer, threadProject: async () => threadProject });
+  store.grantReviewerConsent();
+  const run = await engine.startRun(spec.id, { preset: "implementation", context: [], maxRounds: 3, threadId: "thread-a" });
+  await engine.settle();
+  const [finding] = store.listFindingsForRun(run.id);
+  threadProject = "another-project";
+  const proposal = await engine.propose(spec.id, [finding!.id], "# Spec\n\nSecond version.\n", "fix", "thread-a");
+  await engine.applyProposal(proposal.id, proposal.baseHash, "thread-moved");
+  await engine.settle();
+  const failed = store.getRun(run.id)!;
+  assert.equal(failed.state, "failed");
+  assert.match(failed.stateReason ?? "", /thread no longer belongs to this project/);
+  assert.equal(store.listRuns(spec.id).filter((child) => child.parentRunId === run.id).length, 0);
+  assert.equal(bb.launches.length, 1);
+});
+
+test("a pinned provider that differs from the live endpoint is never contacted", async () => {
+  let calls = 0;
+  const fetchImpl = (async () => {
+    calls++;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  const config = { baseUrl: "http://live/v1", model: "m", apiKey: "sk-synthetic-not-real", timeoutMs: 5000 };
+  const client = new GoldfishClient(async () => config, fetchImpl);
+  const signal = new AbortController().signal;
+  const refused = await client.complete([{ role: "user", content: "x" }], signal, { provider: "http://old/v1///", model: "m" });
+  assert.equal(refused.ok, false);
+  assert.match((refused as { error: string }).error, /endpoint changed/);
+  assert.equal(calls, 0);
+  // A pinned provider that normalizes to the live endpoint still goes through.
+  const allowed = await client.complete([{ role: "user", content: "x" }], signal, { provider: "http://live/v1/", model: "m" });
+  assert.equal(allowed.ok, false); // the stub answers `{}` — not a valid completion — but a request was made
+  assert.equal(calls, 1);
+});
+
+test("a run pinned to a different endpoint fails at start without any chat request", async () => {
+  const { engine, spec, endpoint } = await setup([]);
+  await assert.rejects(
+    engine.startRun(spec.id, {
+      preset: "implementation",
+      context: [],
+      maxRounds: 3,
+      threadId: null,
+      reviewer: { engine: "goldfish", provider: "http://other/v1", model: "m", environmentId: null },
+    }),
+    /endpoint changed/,
+  );
+  assert.equal(endpoint.requests.length, 0);
+});
+
+test("an endpoint error reports the HTTP status but never the response body", async () => {
+  const { store, review } = await setup([{ status: 500, body: "Authorization: Bearer k rejected by upstream" }]);
+  const run = await review("implementation");
+  assert.equal(run.state, "failed");
+  assert.match(run.stateReason ?? "", /HTTP 500/);
+  assert.doesNotMatch(run.stateReason ?? "", /Bearer/);
+  for (const stage of store.listStages(run.id)) {
+    if (stage.state === "failed") {
+      assert.match(stage.error ?? "", /HTTP 500/);
+      assert.doesNotMatch(stage.error ?? "", /Bearer/);
+    }
+  }
+});
+
+test("invalid API key format makes no request and does not expose the key", async () => {
+  const key = "synthetic-key\r\nnever-send";
+  let calls = 0;
+  const fetchImpl = (async () => {
+    calls++;
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  const client = new GoldfishClient(async () => ({ baseUrl: "http://fake/v1", model: "m", apiKey: key, timeoutMs: 5000 }), fetchImpl);
+  const status = await client.status();
+  const complete = await client.complete([{ role: "user", content: "x" }], new AbortController().signal);
+  assert.equal(status.ready, false);
+  assert.equal(status.reason, "invalid API key format");
+  assert.equal(complete.ok, false);
+  if (complete.ok) throw new Error("expected invalid key failure");
+  assert.equal(complete.error, "invalid API key format");
+  assert.equal(calls, 0);
+  assert.doesNotMatch(status.reason ?? "", /synthetic-key/);
+});
+
+test("network errors do not expose a synthetic API key", async () => {
+  const key = "synthetic-key-not-real";
+  const fetchImpl = (async () => {
+    throw new Error(`upstream rejected ${key}`);
+  }) as typeof fetch;
+  const client = new GoldfishClient(async () => ({ baseUrl: "http://fake/v1", model: "m", apiKey: key, timeoutMs: 5000 }), fetchImpl);
+  const status = await client.status();
+  const complete = await client.complete([{ role: "user", content: "x" }], new AbortController().signal);
+  assert.equal(status.ready, false);
+  assert.doesNotMatch(status.reason ?? "", /synthetic-key-not-real/);
+  assert.equal(complete.ok, false);
+  if (complete.ok) throw new Error("expected request failure");
+  assert.doesNotMatch(complete.error, /synthetic-key-not-real/);
+});
+
+test("a continuation after the configured endpoint changed fails visibly without a second request", async () => {
+  const live = { baseUrl: "http://fake/v1" };
+  const { engine, spec, store, endpoint } = await setup([{ content: FINDING("Gap A") }, { content: "NO FINDINGS" }], {
+    config: async () => ({ baseUrl: live.baseUrl, model: "m", apiKey: "k", timeoutMs: 5000 }),
+  });
+  const run = await engine.startRun(spec.id, {
+    preset: "implementation",
+    context: [],
+    maxRounds: 3,
+    threadId: null,
+    reviewer: { engine: "goldfish", provider: "http://fake/v1/", model: "m", environmentId: null },
+  });
+  await engine.settle();
+  const [finding] = store.listFindingsForRun(run.id);
+  const proposal = await engine.propose(spec.id, [finding!.id], "# Spec\n\nSecond version.\n", "cover gap A", "thr_1");
+  live.baseUrl = "http://moved/v1";
+  await engine.applyProposal(proposal.id, proposal.baseHash, "op-apply");
+  await engine.settle();
+  const parent = store.getRun(run.id)!;
+  assert.equal(parent.state, "failed");
+  assert.match(parent.stateReason ?? "", /next round could not start: .*endpoint changed/);
+  assert.equal(endpoint.requests.length, 1); // only round one; no request to the old or new endpoint
+  assert.equal(store.listRuns(spec.id).filter((child) => child.parentRunId === run.id).length, 0);
 });

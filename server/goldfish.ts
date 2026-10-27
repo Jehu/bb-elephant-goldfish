@@ -35,6 +35,19 @@ export type GoldfishResult =
   | { ok: true; text: string; model: string; truncated: boolean }
   | { ok: false; error: string; kind: "cancelled" | "limit" | "failed" };
 
+/** Shared with the engine: a run's pinned endpoint must match the live endpoint before any key is sent. */
+export const ENDPOINT_CHANGED =
+  "the configured reviewer endpoint changed since this review started; it was not contacted with the current key. Start a new review.";
+
+/** Normalize a base URL the same way the server resolves the setting: trim, drop trailing slashes. */
+export const normalizeBaseUrl = (url: string): string => url.trim().replace(/\/+$/, "");
+
+const requestFailure = (cause: unknown): string => {
+  const name = cause instanceof Error ? cause.name : typeof cause;
+  const code = typeof cause === "object" && cause !== null && "code" in cause && typeof cause.code === "string" ? ` (${cause.code})` : "";
+  return `The reviewer endpoint cannot be reached (${name}${code}).`;
+};
+
 export class GoldfishClient {
   readonly engine = "goldfish" as const;
   private readonly config: () => Promise<GoldfishConfig | null>;
@@ -50,19 +63,28 @@ export class GoldfishClient {
     if (config === null) {
       return { engine: "goldfish", ready: false, reason: "No Advanced Goldfish endpoint is configured.", model: null, endpoint: null };
     }
+    if (/[\u0000-\u001F\u007F]/.test(config.apiKey)) {
+      return { engine: "goldfish", ready: false, reason: "invalid API key format", model: config.model, endpoint: config.baseUrl };
+    }
     try {
       const res = await this.fetchImpl(`${config.baseUrl}/models`, { headers: { authorization: `Bearer ${config.apiKey}` }, signal: AbortSignal.timeout(5000) });
       if (!res.ok) return { engine: "goldfish", ready: false, reason: `The reviewer endpoint answered HTTP ${res.status}.`, model: config.model, endpoint: config.baseUrl };
       return { engine: "goldfish", ready: true, reason: null, model: config.model, endpoint: config.baseUrl };
     } catch (cause) {
-      return { engine: "goldfish", ready: false, reason: `The reviewer endpoint cannot be reached: ${(cause as Error).message}`, model: config.model, endpoint: config.baseUrl };
+      return { engine: "goldfish", ready: false, reason: requestFailure(cause), model: config.model, endpoint: config.baseUrl };
     }
   }
 
   async complete(messages: GoldfishMessage[], signal: AbortSignal, call?: { provider: string | null; model: string | null }): Promise<GoldfishResult> {
     const liveConfig = await this.config();
     if (liveConfig === null) return { ok: false, kind: "failed", error: "no Goldfish endpoint is configured" };
-    const config = call?.provider && call.model ? { ...liveConfig, baseUrl: call.provider, model: call.model } : liveConfig;
+    if (/[\u0000-\u001F\u007F]/.test(liveConfig.apiKey)) return { ok: false, kind: "failed", error: "invalid API key format" };
+    const pinned = call?.provider ? normalizeBaseUrl(call.provider) : null;
+    const liveBase = normalizeBaseUrl(liveConfig.baseUrl);
+    // The key is only ever sent to the currently configured endpoint: a run pinned
+    // elsewhere fails without any request instead of combining endpoints.
+    if (pinned && pinned !== liveBase) return { ok: false, kind: "failed", error: ENDPOINT_CHANGED };
+    const config = pinned && call?.model ? { ...liveConfig, baseUrl: pinned, model: call.model } : liveConfig;
     const timeout = AbortSignal.timeout(config.timeoutMs);
     const combined = AbortSignal.any([signal, timeout]);
     let res: Response;
@@ -77,12 +99,12 @@ export class GoldfishClient {
     } catch (cause) {
       if (signal.aborted) return { ok: false, kind: "cancelled", error: "cancelled" };
       if (timeout.aborted) return { ok: false, kind: "limit", error: `no answer within ${Math.round(config.timeoutMs / 1000)} s` };
-      return { ok: false, kind: "failed", error: `request failed: ${(cause as Error).message}` };
+      return { ok: false, kind: "failed", error: requestFailure(cause) };
     }
     if (res.status === 429) return { ok: false, kind: "limit", error: "the reviewer endpoint rate-limited the request (HTTP 429)" };
     if (!res.ok) {
-      const detail = (await res.text().catch(() => "")).slice(0, 300);
-      return { ok: false, kind: "failed", error: `the reviewer endpoint answered HTTP ${res.status}${detail ? `: ${detail}` : ""}` };
+      // Status only: the response body may echo credentials and is never persisted or rendered.
+      return { ok: false, kind: "failed", error: `the reviewer endpoint answered HTTP ${res.status}` };
     }
     let body: unknown;
     try {

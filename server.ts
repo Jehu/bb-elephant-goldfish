@@ -22,7 +22,7 @@ import {
 } from "./server/contract.ts";
 import { Engine, EngineError } from "./server/engine.ts";
 import { BbReviewer } from "./server/bb-reviewer.ts";
-import { GoldfishClient } from "./server/goldfish.ts";
+import { GoldfishClient, normalizeBaseUrl } from "./server/goldfish.ts";
 import { MIGRATIONS, Store } from "./server/store.ts";
 import { resolveInside, WorkspaceError } from "./server/workspace.ts";
 
@@ -45,7 +45,7 @@ export default async function plugin(bb: BbPluginApi) {
     goldfishBaseUrl: {
       type: "string",
       label: "Goldfish endpoint",
-      description: "OpenAI-compatible base URL for reviewer calls, e.g. http://127.0.0.1:20128/v1. Reviewers get no tools.",
+      description: "OpenAI-compatible base URL for reviewer calls, e.g. http://127.0.0.1:20128/v1. It is shown in the UI and reports, so do not embed credentials. Reviewers get no tools.",
       default: "",
     },
     goldfishModel: {
@@ -80,7 +80,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   const goldfish = new GoldfishClient(async () => {
     const value = await settings.get();
-    const baseUrl = String(value.goldfishBaseUrl ?? "").trim().replace(/\/+$/, "");
+    const baseUrl = normalizeBaseUrl(String(value.goldfishBaseUrl ?? ""));
     const model = String(value.goldfishModel ?? "").trim();
     const keyEnv = String(value.goldfishApiKeyEnv ?? "").trim();
     const apiKey = String(value.goldfishApiKey ?? "").trim() || (keyEnv ? process.env[keyEnv] ?? "" : "");
@@ -93,7 +93,7 @@ export default async function plugin(bb: BbPluginApi) {
     const selected = await reviewer();
     if (selected.engine === "goldfish") {
       const value = await settings.get();
-      const baseUrl = String(value.goldfishBaseUrl ?? "").trim().replace(/\/+$/, "");
+      const baseUrl = normalizeBaseUrl(String(value.goldfishBaseUrl ?? ""));
       const model = String(value.goldfishModel ?? "").trim();
       return { engine: "goldfish" as const, provider: baseUrl || null, model: model || null, environmentId: null };
     }
@@ -115,7 +115,7 @@ export default async function plugin(bb: BbPluginApi) {
   };
   const changed = (projectId: string, specId: string | null) => bb.realtime.publish(CHANGED_CHANNEL, { projectId, specId });
 
-  const engine = new Engine({ store, goldfish, reviewer: () => bbReviewer, projectRoot, changed, log: bb.log });
+  const engine = new Engine({ store, goldfish, reviewer: () => bbReviewer, threadProject: async (threadId) => (await bb.sdk.threads.get({ threadId })).projectId, projectRoot, changed, log: bb.log });
   await engine.reconcile();
 
   const describeAll = async (projectId: string): Promise<Spec[]> => {
@@ -201,9 +201,12 @@ export default async function plugin(bb: BbPluginApi) {
         return { projectId: thread.projectId, specs, activeRuns };
       }),
     review_start: (input) =>
-      guard(async () => {
-        const snapshot = await snapshotReviewer(input.threadId);
-        if (snapshot.engine === "bb" && !store.hasReviewerConsent()) throw new EngineError("BB reviewer consent is required in the Elephant Goldfish tab before launch.");
+        guard(async () => {
+          requireProjectSpec(input.specId, input.projectId);
+          if (input.threadId && (await bb.sdk.threads.get({ threadId: input.threadId })).projectId !== input.projectId) {
+            throw new EngineError("Thread does not belong to this project.");
+          }
+          const snapshot = await snapshotReviewer(input.threadId);
         return engine.startRun(input.specId, {
           preset: input.preset,
           ...(input.lenses ? { lenses: input.lenses } : {}),
@@ -302,6 +305,10 @@ export default async function plugin(bb: BbPluginApi) {
     }),
     async execute(params, { projectId, threadId }) {
       try {
+        requireProjectSpec(params.specId, projectId);
+        if (threadId && (await bb.sdk.threads.get({ threadId })).projectId !== projectId) {
+          throw new EngineError("Thread does not belong to this project.");
+        }
         const snapshot = await snapshotReviewer(threadId);
         if (snapshot.engine === "bb" && !store.hasReviewerConsent()) throw new EngineError("BB reviewer consent is required in the Elephant Goldfish tab before launch.");
         const run = await engine.startRun(params.specId, {

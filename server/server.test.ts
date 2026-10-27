@@ -17,7 +17,7 @@ test("agent tools enforce project ownership", async () => {
   const bb = {
     settings: { define: () => ({ get: async () => ({ goldfishBaseUrl: "", goldfishModel: "", goldfishApiKey: "", goldfishApiKeyEnv: "", goldfishTimeoutSeconds: 30 }) }) },
     storage: { database: () => db, migrate: (_db: unknown, migrations: string[]) => migrations.forEach((sql) => db.exec(sql)) },
-    sdk: { projects: { get: async () => ({ sources: [{ type: "local_path", path: root, isDefault: true }] }) } },
+    sdk: { projects: { get: async () => ({ sources: [{ type: "local_path", path: root, isDefault: true }] }) }, threads: { get: async ({ threadId }: { threadId: string }) => ({ projectId: threadId === "thread-a" ? "a" : "other" }) } },
     realtime: { publish: () => {} }, log: { info: () => {}, warn: () => {} },
     rpc: { register: (_contract: unknown, handlers: typeof rpc) => { rpc = handlers; } },
     agents: { registerTool: (tool: { name: string; parameters: { safeParse: (value: unknown) => { success: boolean } }; execute: (params: Record<string, unknown>, context: { projectId: string; threadId: string }) => Promise<unknown> }) => { tools.set(tool.name, tool.execute); schemas.set(tool.name, tool.parameters); }, configure: () => {} },
@@ -49,6 +49,17 @@ test("agent tools enforce project ownership", async () => {
     assert.equal(store.getFinding("finding-a")?.elephantNote, null);
     assert.equal(store.listProposals("spec-a").length, 0);
     const status = await tools.get("egm_review_status")!({ specId: "spec-a" }, { projectId: "a", threadId: "thread-a" });
+    // review_start only accepts specs and threads of the calling project.
+    await assert.rejects(
+      rpc.review_start!({ specId: "spec-a", projectId: "b", preset: "implementation", context: [], maxRounds: 1, threadId: null }),
+      /Unknown spec/,
+    );
+    await assert.rejects(
+      rpc.review_start!({ specId: "spec-a", projectId: "a", preset: "implementation", context: [], maxRounds: 1, threadId: "thread-b" }),
+      /does not belong/,
+    );
+    const foreignThread = await tools.get("egm_start_review")!({ specId: "spec-a", preset: "implementation", context: [], maxRounds: 1 }, { projectId: "a", threadId: "thread-b" }) as { isError?: boolean };
+    assert.equal(foreignThread.isError, true);
     assert.equal(typeof status, "string");
     const proposed = JSON.parse(await tools.get("egm_propose")!({ specId: "spec-a", findingIds: ["finding-a"], content: "# Updated spec\n", summary: "Change" }, { projectId: "a", threadId: "thread-a" }) as string) as { id: string; baseHash: string };
     const target = path.join(root, "spec.md");

@@ -62,7 +62,7 @@ choose `goldfish` for **Reviewer engine**, then set:
 
 | Setting | Meaning |
 |---|---|
-| `goldfishBaseUrl` | OpenAI-compatible base URL, ending in `/v1` |
+| `goldfishBaseUrl` | OpenAI-compatible base URL, ending in `/v1`; it is displayed in the UI and reports, so never embed credentials in it |
 | `goldfishModel` | Model id at that endpoint |
 | `goldfishApiKey` | Bearer key, stored by BB in its plugin secret store |
 | `goldfishApiKeyEnv` | Alternative: environment variable of the **BB server process** containing the key |
@@ -79,6 +79,13 @@ bb egm status
 
 With no configured or reachable selected engine, review launch is refused with a
 reason. The plugin does not substitute an Elephant critique or another engine.
+
+The configured key is only ever sent to the currently configured endpoint. If
+the endpoint setting changes while a review (or a later round of it) is still
+pending, that run fails with an "endpoint changed" message instead of pairing
+the stored endpoint with the new key; start a fresh review. Endpoint error
+messages report the HTTP status only — response bodies are never persisted or
+rendered.
 
 ## Workflow
 

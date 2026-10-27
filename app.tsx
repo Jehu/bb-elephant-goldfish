@@ -397,7 +397,7 @@ function StartReview({ spec, threadId, reviewer }: { spec: Spec; threadId: strin
   const [busy, setBusy] = useState(false);
   const disabled = !reviewer?.ready || !spec.exists || busy || (preset === "custom" && lenses.length === 0);
   const engineLabel = reviewer?.engine === "bb" ? "BB worker" : "Advanced endpoint";
-  const start = () => rpc.call("review_start", { specId: spec.id, preset, ...(preset === "custom" ? { lenses, standard } : {}), context: context.split(",").map((s) => s.trim()).filter(Boolean), maxRounds, threadId });
+  const start = () => rpc.call("review_start", { specId: spec.id, projectId: spec.projectId, preset, ...(preset === "custom" ? { lenses, standard } : {}), context: context.split(",").map((s) => s.trim()).filter(Boolean), maxRounds, threadId });
   const requestStart = async () => {
     setBusy(true);
     setError(null);

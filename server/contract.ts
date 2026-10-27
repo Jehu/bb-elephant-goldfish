@@ -296,6 +296,7 @@ export const rpcContract = defineRpcContract({
   review_start: {
     input: z.object({
       specId: id,
+      projectId,
       preset: z.enum(PRESET_IDS),
       lenses: z.array(z.enum(LENS_IDS)).optional(),
       standard: z.enum(STANDARD_IDS).optional(),

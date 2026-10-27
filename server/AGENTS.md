@@ -33,6 +33,11 @@ spec changes for the Elephant Goldfish BB plugin.
   including their operation receipts; an unknown outcome retains the backup and
   releases findings still attached to that proposal. External editors are not
   locked and may race with or overwrite the replacement.
+- Confirmed apply resolves the configured reviewer before any file mutation and
+  pins that snapshot in the apply intent and the deferred ad hoc task; crash
+  reconciliation reuses the pinned snapshot (legacy intents resolve one via the
+  settings hook). A pending ad hoc task without a pinned reviewer refuses to
+  start instead of guessing an engine.
 - A proposal may address no findings; if it addresses findings, they must all
   belong to the same review run. An outstanding apply intent blocks
   any other apply for the spec, rejection, decisions and reproposals of its
@@ -65,7 +70,9 @@ spec changes for the Elephant Goldfish BB plugin.
 ## Verification
 
 - `npm run typecheck`
-- `npm test`: real temporary SQLite and workspace files, no wall-clock sleeps.
+- `npm test`: real temporary SQLite and workspace files, no wall-clock sleeps
+  (exception: the registered-RPC smoke polls the background run once against a
+  live stub endpoint).
 - `npm run build`; then `bb plugin reload elephant-goldfish` for a live check.
 
 ## Child DOX Index

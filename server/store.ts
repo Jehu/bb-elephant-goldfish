@@ -14,11 +14,13 @@ import type {
   ProposalState,
   Run,
   RunState,
+  ReviewerSnapshotDto,
   Severity,
   Spec,
   Stage,
   StandardId,
 } from "./contract.ts";
+import { reviewerSnapshotSchema } from "./contract.ts";
 
 // Append-only. Never edit or reorder shipped statements.
 export const MIGRATIONS: string[] = [
@@ -145,6 +147,7 @@ export const MIGRATIONS: string[] = [
    ALTER TABLE stages ADD COLUMN worker_thread_id TEXT;
    CREATE TABLE reviewer_consent (scope TEXT PRIMARY KEY, granted_at INTEGER NOT NULL);`,
   `ALTER TABLE runs ADD COLUMN environment_id TEXT;`,
+  `ALTER TABLE apply_intents ADD COLUMN reviewer_json TEXT;`,
 ];
 
 export const newId = (): string => randomUUID().replace(/-/g, "").slice(0, 24);
@@ -237,6 +240,8 @@ export type ApplyIntent = {
   stagedPath: string;
   createdAt: number;
   operationId?: string | null;
+  /** Reviewer snapshot captured before the file mutation; null on legacy rows. */
+  reviewer?: ReviewerSnapshotDto | null;
 };
 
 export type AdHocReviewOptions = {
@@ -246,6 +251,7 @@ export type AdHocReviewOptions = {
   context: string[];
   maxRounds: number;
   threadId: string | null;
+  reviewer?: ReviewerSnapshotDto;
 };
 
 export type AdHocReviewTask = {
@@ -264,13 +270,22 @@ type AdHocReviewTaskRow = {
   run_id: string | null;
 };
 
-const adHocReviewTaskFromRow = (r: AdHocReviewTaskRow): AdHocReviewTask => ({
-  proposalId: r.proposal_id,
-  targetHash: r.target_hash,
-  options: JSON.parse(r.options_json) as AdHocReviewOptions,
-  createdAt: r.created_at,
-  runId: r.run_id,
-});
+const parseReviewerSnapshot = (value: unknown): ReviewerSnapshotDto | undefined => {
+  if (value == null) return undefined;
+  const parsed = reviewerSnapshotSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+};
+
+const adHocReviewTaskFromRow = (r: AdHocReviewTaskRow): AdHocReviewTask => {
+  const options = JSON.parse(r.options_json) as AdHocReviewOptions;
+  return {
+    proposalId: r.proposal_id,
+    targetHash: r.target_hash,
+    options: { ...options, reviewer: parseReviewerSnapshot(options.reviewer) },
+    createdAt: r.created_at,
+    runId: r.run_id,
+  };
+};
 
 /** A spec row without the live file facts the RPC layer adds. */
 export type SpecRecord = { id: string; projectId: string; path: string; title: string; createdAt: number };
@@ -684,8 +699,8 @@ export class Store {
   putApplyIntent(intent: ApplyIntent): void {
     this.db
       .prepare(
-        `INSERT INTO apply_intents (proposal_id, target_path, base_hash, result_hash, backup_path, staged_path, created_at, operation_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO apply_intents (proposal_id, target_path, base_hash, result_hash, backup_path, staged_path, created_at, operation_id, reviewer_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         intent.proposalId,
@@ -696,6 +711,7 @@ export class Store {
         intent.stagedPath,
         intent.createdAt,
         intent.operationId ?? null,
+        intent.reviewer ? JSON.stringify(reviewerSnapshotSchema.parse(intent.reviewer)) : null,
       );
   }
 
@@ -713,6 +729,7 @@ export class Store {
       staged_path: string;
       created_at: number;
       operation_id: string | null;
+      reviewer_json: string | null;
     };
     return this.db
       .prepare<[], Row>("SELECT * FROM apply_intents ORDER BY created_at")
@@ -726,6 +743,7 @@ export class Store {
         stagedPath: r.staged_path,
         createdAt: r.created_at,
         operationId: r.operation_id,
+        reviewer: parseReviewerSnapshot(r.reviewer_json ? JSON.parse(r.reviewer_json) : null) ?? null,
       }));
   }
 
@@ -737,7 +755,7 @@ export class Store {
         `INSERT INTO ad_hoc_review_tasks (proposal_id, target_hash, options_json, created_at)
          VALUES (?, ?, ?, ?) ON CONFLICT(proposal_id) DO NOTHING`,
       )
-      .run(task.proposalId, task.targetHash, JSON.stringify(task.options), task.createdAt);
+      .run(task.proposalId, task.targetHash, JSON.stringify(task.options.reviewer ? { ...task.options, reviewer: reviewerSnapshotSchema.parse(task.options.reviewer) } : task.options), task.createdAt);
   }
 
   getAdHocReviewTask(proposalId: string): AdHocReviewTask | null {

@@ -15,6 +15,7 @@ import {
   type LensId,
   type PresetId,
   type Proposal,
+  type ReviewerSnapshotDto,
   type ReviewerEngine,
   type ReviewerStatus,
   type Run,
@@ -52,6 +53,8 @@ export type EngineDeps = {
   store: Store;
   goldfish: ReviewEngine;
   reviewer?: () => ReviewEngine;
+  /** Settings-aware reviewer snapshot captured before an ad hoc apply mutates files. */
+  currentReviewer?(threadId: string | null): Promise<ReviewerSnapshot>;
   /** Project that owns a BB thread, or null when it no longer exists. */
   threadProject(threadId: string): Promise<string | null>;
   /** Absolute workspace root of a project on this BB server, or null. */
@@ -61,7 +64,7 @@ export type EngineDeps = {
   log: { info(msg: string): void; warn(msg: string): void };
 };
 
-export type ReviewerSnapshot = { engine: ReviewerEngine; provider: string | null; model: string | null; environmentId: string | null };
+export type ReviewerSnapshot = ReviewerSnapshotDto;
 export type StartOptions = {
   preset: PresetId;
   lenses?: LensId[];
@@ -273,6 +276,9 @@ export class Engine {
       if (adHocProposalId) {
         const task = store.getAdHocReviewTask(adHocProposalId);
         if (!task || task.runId || file.hash !== task.targetHash) throw new EngineError("The applied version changed before its automatic review could start.");
+        if (!task.options.reviewer) {
+          throw new EngineError(`The automatic review for spec "${spec.path}" (proposal ${adHocProposalId}) was recorded without a reviewer engine; relaunch the review with the desired engine (egm_start_review).`);
+        }
       }
       if (parentRunId) {
         const applied = store.listProposals(spec.id).filter((p) => p.runId === parentRunId && p.state === "applied")
@@ -752,8 +758,13 @@ export class Engine {
       const root = await this.root(spec.projectId);
       const target = await resolveInside(root, spec.path);
       const plan = planApply(target, proposal.id);
+      // Resolve the configured reviewer before any mutation so the automatic
+      // review cannot silently fall back to another engine later.
+      const reviewerSnapshot = !proposal.runId && !store.listRuns(proposal.specId).length
+        ? await this.deps.currentReviewer?.(proposal.author ?? null)
+        : undefined;
       const outcome = await compareAndReplace(plan, proposal.baseHash, proposal.resultContent, () => {
-        store.putApplyIntent({ proposalId, ...plan, baseHash: proposal.baseHash, resultHash: proposal.resultHash, createdAt: Date.now(), operationId: opId });
+        store.putApplyIntent({ proposalId, ...plan, baseHash: proposal.baseHash, resultHash: proposal.resultHash, createdAt: Date.now(), operationId: opId, reviewer: reviewerSnapshot ?? null });
       });
       const result = store.transaction(() => {
         const state = outcome.kind === "applied" ? "applied" : outcome.kind;
@@ -766,7 +777,7 @@ export class Engine {
         store.deleteApplyIntent(proposalId);
         if (outcome.kind === "applied") {
           for (const id of proposal.findingIds) store.setFindingState(id, "fixed");
-          if (!proposal.runId) this.recordAdHocReview(spec, proposal);
+          if (!proposal.runId) this.recordAdHocReview(spec, proposal, reviewerSnapshot);
           else store.advancePendingAdHocReviewTasks(spec.id, proposal.baseHash, proposal.resultHash);
         } else {
           this.releaseStaleFindings(spec.id);
@@ -783,7 +794,7 @@ export class Engine {
     });
   }
 
-  private recordAdHocReview(spec: SpecRecord, proposal: Proposal): void {
+  private recordAdHocReview(spec: SpecRecord, proposal: Proposal, snapshot?: ReviewerSnapshot): void {
     const { store } = this.deps;
     const latest = store.listRuns(spec.id)[0];
     const stages = latest ? store.listStages(latest.id) : [];
@@ -791,9 +802,22 @@ export class Engine {
       preset: latest.preset, context: latest.context, maxRounds: latest.maxRounds, threadId: latest.threadId,
       reviewer: { engine: latest.engine, provider: latest.provider, model: latest.model, environmentId: latest.environmentId ?? null },
       ...(latest.preset === "custom" ? { lenses: stages.map((stage) => stage.lens), standard: stages[0]?.standard } : {}),
-    } : { preset: "full", context: [], maxRounds: 3, threadId: proposal.author || null };
+    } : { preset: "full", context: [], maxRounds: 3, threadId: proposal.author || null, reviewer: snapshot };
     store.deleteOtherPendingAdHocReviewTasks(spec.id, proposal.id);
     store.putAdHocReviewTask({ proposalId: proposal.id, targetHash: proposal.resultHash, options, createdAt: Date.now() });
+  }
+
+  /** Best-effort snapshot for legacy intents; failures keep evidence, not a crash. */
+  private async resolveLegacyReviewer(proposal: Proposal): Promise<ReviewerSnapshot | undefined> {
+    try {
+      return await this.deps.currentReviewer?.(proposal.author ?? null);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      const spec = this.deps.store.getSpec(proposal.specId);
+      this.deps.log.warn(`Could not resolve the reviewer for the recovered apply ${proposal.id}: ${message}`);
+      this.deps.store.addEvent(spec?.id ?? null, null, "proposal.review_failed", `Automatic review for proposal ${proposal.id} could not resolve its reviewer: ${message}; relaunch the review with the desired engine (egm_start_review).`);
+      return undefined;
+    }
   }
 
   private scheduleAdHocReview(spec: SpecRecord, proposalId: string): void {
@@ -911,6 +935,9 @@ export class Engine {
         intent.baseHash,
         intent.resultHash,
       );
+      // Legacy intents predate reviewer pinning: resolve the snapshot before
+      // entering the transaction; a failure keeps evidence instead of crashing.
+      const reviewerSnapshot = !proposal.runId && !intent.reviewer ? await this.resolveLegacyReviewer(proposal) : intent.reviewer ?? undefined;
       store.transaction(() => {
         if (result.state === "applied") {
           if (!store.setProposalState(proposal.id, ["proposed", "stale"], "applied", result.reason, { appliedAt: Date.now(), backupPath: intent.backupPath })) {
@@ -918,7 +945,7 @@ export class Engine {
           }
           if (!proposal.runId) {
             const spec = store.getSpec(proposal.specId);
-            if (spec) this.recordAdHocReview(spec, proposal);
+            if (spec) this.recordAdHocReview(spec, proposal, reviewerSnapshot);
           }
           else store.advancePendingAdHocReviewTasks(proposal.specId, proposal.baseHash, proposal.resultHash);
           for (const id of proposal.findingIds) {

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -146,5 +148,78 @@ test("workspace search uses the thread checkout and returns confined files", asy
     db.close();
     await fs.rm(root, { recursive: true, force: true });
     await fs.rm(other, { recursive: true, force: true });
+  }
+});
+
+test("a registered ad hoc RPC apply launches the configured Goldfish engine, never BB", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "egm-rpc-"));
+  const db = new Database(":memory:");
+  const chats: { model: string }[] = [];
+  const stub = http.createServer((req, res) => {
+    const reply = (body: unknown) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    if (req.url?.endsWith("/models")) return reply({ data: [{ id: "stub-model" }] });
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", () => {
+      chats.push(JSON.parse(raw));
+      reply({ model: "stub-model", choices: [{ message: { content: "NO FINDINGS" }, finish_reason: "stop" }] });
+    });
+  });
+  const listening = Promise.withResolvers<void>();
+  stub.listen(0, "127.0.0.1", () => listening.resolve());
+  await listening.promise;
+  const closed = Promise.withResolvers<void>();
+  t.after(() => {
+    stub.close(() => closed.resolve());
+    return closed.promise;
+  });
+  const baseUrl = `http://127.0.0.1:${(stub.address() as AddressInfo).port}/v1`;
+  const settings = { goldfishBaseUrl: baseUrl, goldfishModel: "stub-model", goldfishApiKey: "stub-key", goldfishApiKeyEnv: "", goldfishTimeoutSeconds: 30, reviewerEngine: "goldfish" };
+  let rpc: Record<string, (params: Record<string, unknown>) => Promise<unknown>> = {};
+  const tools = new Map<string, (params: Record<string, unknown>, context: { projectId: string; threadId: string }) => Promise<unknown>>();
+  const threadCalls: string[] = [];
+  const bb = {
+    settings: { define: () => ({ get: async () => settings }) },
+    storage: { database: () => db, migrate: (_db: unknown, migrations: string[]) => migrations.forEach((sql) => db.exec(sql)) },
+    sdk: {
+      projects: { get: async () => ({ sources: [{ type: "local_path", path: root, isDefault: true }] }) },
+      threads: { get: async ({ threadId }: { threadId: string }) => { threadCalls.push(threadId); return { projectId: "a", environmentId: "env-1" }; } },
+    },
+    realtime: { publish: () => {} }, log: { info: () => {}, warn: () => {} },
+    rpc: { register: (_contract: unknown, handlers: typeof rpc) => { rpc = handlers; } },
+    agents: { registerTool: (tool: { name: string; execute: (params: Record<string, unknown>, context: { projectId: string; threadId: string }) => Promise<unknown> }) => { tools.set(tool.name, tool.execute); }, configure: () => {} },
+    cli: { register: () => {} }, onDispose: () => {},
+  };
+  try {
+    await fs.writeFile(path.join(root, "spec.md"), "# Spec\n\nFirst.\n");
+    await plugin(bb as unknown as BbPluginApi);
+    const store = new Store(db);
+    store.insertSpec({ id: "spec-a", projectId: "a", path: "spec.md", title: "Spec", createdAt: 1 });
+    const proposed = JSON.parse(await tools.get("egm_propose")!({ specId: "spec-a", findingIds: [], content: "# Spec\n\nUpdated.\n", summary: "Change" }, { projectId: "a", threadId: "thread-a" }) as string) as { id: string; baseHash: string };
+    const applied = await rpc.proposal_apply!({ proposalId: proposed.id, baseHash: proposed.baseHash, opId: "rpc-smoke" }) as { state: string };
+    assert.equal(applied.state, "applied");
+    assert.equal(await fs.readFile(path.join(root, "spec.md"), "utf8"), "# Spec\n\nUpdated.\n");
+    // Real integration wait: the automatic review runs in the engine's
+    // background tracker, which the RPC surface does not expose; poll the
+    // store against the live stub endpoint (deterministic control unavailable).
+    const deadline = Date.now() + 15000;
+    let run = store.listRuns("spec-a")[0];
+    while ((!run || run.state === "running") && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      run = store.listRuns("spec-a")[0];
+    }
+    assert.ok(run, "the automatic review started");
+    assert.equal(run.engine, "goldfish");
+    assert.equal(run.model, "stub-model");
+    assert.equal(run.provider, baseUrl);
+    assert.equal(run.state, "completed");
+    assert.ok(chats.length >= 1, "the stub endpoint served the review");
+    assert.deepEqual(threadCalls, [], "no BB worker thread was consulted");
+  } finally {
+    db.close();
+    await fs.rm(root, { recursive: true, force: true });
   }
 });

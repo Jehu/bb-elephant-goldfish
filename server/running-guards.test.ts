@@ -170,7 +170,7 @@ test("reconciliation retains an orphan intent and its files without recording an
   store.putApplyIntent({ proposalId: proposal.id, targetPath: target, backupPath: normalBackup, stagedPath: normalStaged, baseHash: proposal.baseHash, resultHash: sha256(content), createdAt: 2, operationId: "normal-apply" });
 
   await engine.reconcile();
-  assert.deepEqual(store.listApplyIntents(), [intent]);
+  assert.deepEqual(store.listApplyIntents(), [{ ...intent, reviewer: null }]);
   assert.equal(store.getOperation("orphan-apply"), null);
   assert.ok(store.getOperation("normal-apply"));
   assert.equal(store.getProposal(proposal.id)!.state, "applied");

@@ -115,7 +115,7 @@ export default async function plugin(bb: BbPluginApi) {
   };
   const changed = (projectId: string, specId: string | null) => bb.realtime.publish(CHANGED_CHANNEL, { projectId, specId });
 
-  const engine = new Engine({ store, goldfish, reviewer: () => bbReviewer, threadProject: async (threadId) => (await bb.sdk.threads.get({ threadId })).projectId, projectRoot, changed, log: bb.log });
+  const engine = new Engine({ store, goldfish, reviewer: () => bbReviewer, currentReviewer: snapshotReviewer, threadProject: async (threadId) => (await bb.sdk.threads.get({ threadId })).projectId, projectRoot, changed, log: bb.log });
   await engine.reconcile();
 
   const describeAll = async (projectId: string): Promise<Spec[]> => {

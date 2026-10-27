@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import Database from "better-sqlite3";
-import { Engine, type ReviewEngine, type ReviewerCall } from "./engine.ts";
+import { Engine, type ReviewEngine, type ReviewerCall, type ReviewerSnapshot } from "./engine.ts";
 import { GoldfishClient } from "./goldfish.ts";
 import { MIGRATIONS, Store } from "./store.ts";
 import { sha256 } from "./workspace.ts";
@@ -53,7 +53,7 @@ function fakeEndpoint(replies: Reply[]) {
 
 const FINDING = (title: string, severity = "major") => `### FINDING\nseverity: ${severity}\nlines: 1-2\ntitle: ${title}\nBecause reasons.\n`;
 
-async function setup(replies: Reply[], options: { configured?: boolean; bb?: () => ReviewEngine; config?: () => Promise<{ baseUrl: string; model: string; apiKey: string; timeoutMs: number } | null>; threadProject?: (threadId: string) => Promise<string | null> } = {}) {
+async function setup(replies: Reply[], options: { configured?: boolean; bb?: () => ReviewEngine; currentReviewer?: ((threadId: string | null) => Promise<ReviewerSnapshot>) | null; config?: () => Promise<{ baseUrl: string; model: string; apiKey: string; timeoutMs: number } | null>; threadProject?: (threadId: string) => Promise<string | null> } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "egm-eng-")));
   await fs.mkdir(path.join(root, "docs"), { recursive: true });
   await fs.writeFile(path.join(root, "docs/spec.md"), "# Spec\n\nFirst version.\n");
@@ -70,6 +70,7 @@ async function setup(replies: Reply[], options: { configured?: boolean; bb?: () 
     store,
     goldfish,
     reviewer: options.bb,
+    ...(options.currentReviewer === null ? {} : { currentReviewer: options.currentReviewer ?? (async () => ({ engine: "goldfish" as const, provider: "http://fake/v1", model: "m", environmentId: null })) }),
     threadProject: options.threadProject ?? (async () => "proj"),
     projectRoot: async () => root,
     changed: () => {},
@@ -1056,4 +1057,131 @@ test("a continuation after the configured endpoint changed fails visibly without
   assert.match(parent.stateReason ?? "", /next round could not start: .*endpoint changed/);
   assert.equal(endpoint.requests.length, 1); // only round one; no request to the old or new endpoint
   assert.equal(store.listRuns(spec.id).filter((child) => child.parentRunId === run.id).length, 0);
+});
+
+test("a first-ever ad hoc apply pins the configured goldfish reviewer", async () => {
+  const calls: (string | null)[] = [];
+  const currentReviewer = async (threadId: string | null) => {
+    calls.push(threadId);
+    return { engine: "goldfish" as const, provider: "http://fake/v1", model: "pinned-model", environmentId: null };
+  };
+  const { engine, spec, store } = await setup([], { currentReviewer });
+  const content = "# Spec\n\nAd hoc change.\n";
+  const proposal = await engine.propose(spec.id, [], content, "change", "author-thread");
+  await engine.applyProposal(proposal.id, proposal.baseHash, "ad-hoc-pin");
+  await engine.settle();
+  assert.deepEqual(calls, ["author-thread"]);
+  const task = store.getAdHocReviewTask(proposal.id)!;
+  assert.deepEqual(task.options.reviewer, { engine: "goldfish", provider: "http://fake/v1", model: "pinned-model", environmentId: null });
+  const run = store.listRuns(spec.id)[0]!;
+  assert.equal(run.engine, "goldfish");
+  assert.equal(run.provider, "http://fake/v1");
+  assert.equal(run.model, "pinned-model");
+});
+
+test("a first-ever ad hoc apply with BB selected launches BB only with consent", async () => {
+  const bb = fakeBb(["NO FINDINGS"]);
+  const currentReviewer = async () => ({ engine: "bb" as const, provider: null, model: null, environmentId: null });
+  const refused = await setup([], { bb: bb.reviewer, currentReviewer });
+  const proposal = await refused.engine.propose(refused.spec.id, [], "# Spec\n\nAd hoc.\n", "change", "thr");
+  await refused.engine.applyProposal(proposal.id, proposal.baseHash, "ad-hoc-bb-refused");
+  await refused.engine.settle();
+  assert.deepEqual(refused.store.listRuns(refused.spec.id), []);
+  assert.equal(bb.launches.length, 0);
+  assert.ok(refused.store.listEvents(refused.spec.id).some((e) => e.kind === "proposal.review_failed" && /consent/.test(e.message)));
+
+  const allowed = await setup([], { bb: bb.reviewer, currentReviewer });
+  allowed.store.grantReviewerConsent();
+  const second = await allowed.engine.propose(allowed.spec.id, [], "# Spec\n\nAd hoc two.\n", "change", "thr");
+  await allowed.engine.applyProposal(second.id, second.baseHash, "ad-hoc-bb-allowed");
+  await allowed.engine.settle();
+  const run = allowed.store.listRuns(allowed.spec.id)[0]!;
+  assert.equal(run.engine, "bb");
+  assert.ok(allowed.store.getAdHocReviewTask(second.id)!.runId);
+  assert.equal(bb.launches.length, 5);
+});
+
+test("an ad hoc apply on a spec with a prior run reuses that run's reviewer without consulting settings", async () => {
+  const calls: (string | null)[] = [];
+  const currentReviewer = async (threadId: string | null) => {
+    calls.push(threadId);
+    return { engine: "bb" as const, provider: null, model: null, environmentId: null };
+  };
+  const { engine, spec, store, review } = await setup([{ content: "NO FINDINGS" }], { currentReviewer });
+  const prior = await review("implementation");
+  const proposal = await engine.propose(spec.id, [], "# Spec\n\nIndependent.\n", "change", "thr");
+  await engine.applyProposal(proposal.id, proposal.baseHash, "ad-hoc-prior");
+  await engine.settle();
+  assert.deepEqual(calls, []);
+  const fresh = store.listRuns(spec.id).find((run) => run.id !== prior.id)!;
+  assert.equal(fresh.engine, prior.engine);
+  assert.deepEqual(store.getAdHocReviewTask(proposal.id)!.options.reviewer, { engine: prior.engine, provider: prior.provider, model: prior.model, environmentId: prior.environmentId ?? null });
+});
+
+test("a reviewer snapshot failure aborts the ad hoc apply before any mutation", async () => {
+  const { root, engine, spec, store } = await setup([], { currentReviewer: async () => { throw new Error("settings unavailable"); } });
+  const proposal = await engine.propose(spec.id, [], "# Spec\n\nAd hoc.\n", "change", "thr");
+  await assert.rejects(engine.applyProposal(proposal.id, proposal.baseHash, "ad-hoc-snapshot-fail"), /settings unavailable/);
+  assert.equal(store.getProposal(proposal.id)!.state, "proposed");
+  assert.deepEqual(store.listApplyIntents(), []);
+  assert.deepEqual(store.listPendingAdHocReviewTasks(), []);
+  assert.deepEqual(store.listRuns(spec.id), []);
+  assert.equal(await fs.readFile(path.join(root, "docs/spec.md"), "utf8"), "# Spec\n\nFirst version.\n");
+});
+
+test("a crash after the intent still starts the pinned engine even after settings flip to BB", async () => {
+  const bb = fakeBb(["NO FINDINGS"]);
+  const { root, engine, spec, store } = await setup([], { bb: bb.reviewer, currentReviewer: async () => ({ engine: "bb" as const, provider: null, model: null, environmentId: null }) });
+  const content = "# Spec\n\nRecovered ad hoc change.\n";
+  const proposal = await engine.propose(spec.id, [], content, "change", "thr");
+  const target = path.join(root, "docs/spec.md");
+  const backup = path.join(root, "docs/ad-hoc-backup");
+  await fs.copyFile(target, backup);
+  store.putApplyIntent({ proposalId: proposal.id, targetPath: target, backupPath: backup, stagedPath: path.join(root, "docs/ad-hoc-staged"), baseHash: proposal.baseHash, resultHash: sha256(content), createdAt: Date.now(), operationId: "ad-hoc-crash", reviewer: { engine: "goldfish", provider: "http://fake/v1", model: "crash-model", environmentId: null } });
+  assert.deepEqual(store.listApplyIntents()[0]!.reviewer, { engine: "goldfish", provider: "http://fake/v1", model: "crash-model", environmentId: null });
+  await fs.writeFile(target, content);
+  await engine.reconcile();
+  await engine.settle();
+  const run = store.listRuns(spec.id)[0]!;
+  assert.equal(run.engine, "goldfish");
+  assert.equal(run.model, "crash-model");
+  assert.equal(bb.launches.length, 0);
+  assert.deepEqual(store.listApplyIntents(), []);
+});
+
+test("a legacy intent without a reviewer snapshot resolves one at reconciliation", async () => {
+  const calls: (string | null)[] = [];
+  const currentReviewer = async (threadId: string | null) => {
+    calls.push(threadId);
+    return { engine: "goldfish" as const, provider: "http://fake/v1", model: "legacy-model", environmentId: null };
+  };
+  const { root, engine, spec, store } = await setup([], { currentReviewer });
+  const content = "# Spec\n\nLegacy recovered change.\n";
+  const proposal = await engine.propose(spec.id, [], content, "change", "legacy-thread");
+  const target = path.join(root, "docs/spec.md");
+  const backup = path.join(root, "docs/legacy-backup");
+  await fs.copyFile(target, backup);
+  store.putApplyIntent({ proposalId: proposal.id, targetPath: target, backupPath: backup, stagedPath: path.join(root, "docs/legacy-staged"), baseHash: proposal.baseHash, resultHash: sha256(content), createdAt: Date.now(), operationId: "legacy-intent" });
+  await fs.writeFile(target, content);
+  await engine.reconcile();
+  await engine.settle();
+  assert.deepEqual(calls, ["legacy-thread"]);
+  const run = store.listRuns(spec.id)[0]!;
+  assert.equal(run.engine, "goldfish");
+  assert.equal(run.model, "legacy-model");
+  assert.deepEqual(store.getAdHocReviewTask(proposal.id)!.options.reviewer, { engine: "goldfish", provider: "http://fake/v1", model: "legacy-model", environmentId: null });
+});
+
+test("a legacy pending ad hoc task without a reviewer refuses to start instead of guessing", async () => {
+  const { root, engine, spec, store } = await setup([]);
+  const content = "# Spec\n\nLegacy task.\n";
+  const proposal = await engine.propose(spec.id, [], content, "change", "thr");
+  await fs.writeFile(path.join(root, "docs/spec.md"), content);
+  store.setProposalState(proposal.id, ["proposed"], "applied", "legacy", { appliedAt: Date.now() });
+  store.putAdHocReviewTask({ proposalId: proposal.id, targetHash: sha256(content), options: { preset: "full", context: [], maxRounds: 3, threadId: null }, createdAt: Date.now() });
+  await assert.rejects(engine.startRun(spec.id, store.getAdHocReviewTask(proposal.id)!.options, null, proposal.id), /recorded without a reviewer engine/);
+  await engine.reconcile();
+  await engine.settle();
+  assert.deepEqual(store.listRuns(spec.id), []);
+  assert.ok(store.listEvents(spec.id).some((e) => e.kind === "proposal.review_failed" && /recorded without a reviewer engine/.test(e.message)));
 });

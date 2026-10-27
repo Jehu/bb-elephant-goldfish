@@ -122,6 +122,15 @@ export type Spec = z.infer<typeof specSchema>;
 export const reviewerEngineSchema = z.enum(["goldfish", "bb"]);
 export type ReviewerEngine = z.infer<typeof reviewerEngineSchema>;
 
+/** The reviewer engine and its pins captured at decision time; no secrets. */
+export const reviewerSnapshotSchema = z.object({
+  engine: reviewerEngineSchema,
+  provider: z.string().nullable(),
+  model: z.string().nullable(),
+  environmentId: z.string().nullable(),
+});
+export type ReviewerSnapshotDto = z.infer<typeof reviewerSnapshotSchema>;
+
 export const stageSchema = z.object({
   id,
   runId: id,

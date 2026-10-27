@@ -2,10 +2,10 @@
 name: egm-review
 license: Apache-2.0
 description: >-
-  Run the EGM Goldfish review of a Markdown design document or spec through the
-  Elephant Goldfish plugin: fresh-context, tool-less reviewers in stages
-  (zoom out, comprehension, design critic, intermediate zoom out,
-  implementation readiness). Use when the user asks to review a design doc,
+  Run the EGM review of a Markdown design document or spec through the Elephant
+  Goldfish plugin: default BB workers or the optional tool-less Advanced endpoint
+  in staged reviewers (zoom out, comprehension, design critic, intermediate zoom
+  out, implementation readiness). Use when the user asks to review a design doc,
   feature spec or implementation plan.
 ---
 
@@ -13,18 +13,18 @@ description: >-
 
 Adapted from google/elephant-goldfish-model @ 3d0b348 (Apache-2.0; see `LICENSE`). Read `references/execution-constraints.md` relative to this skill directory; the workflow below replaces upstream delegation and remediation instructions.
 
-You are the **Elephant**: you hold the conversation and project context. The **Goldfish** reviewers are not you and not BB threads. The plugin runs each one as a single, tool-less model call with only the persona, the document standard, the numbered document and the context files the human chose. You never write a Goldfish report yourself, and you never present your own critique as a Goldfish review.
+You are the **Elephant**: you hold the conversation and project context. Reviewers are not you. The default engine launches fresh BB worker threads in the reviewed project environment; they can use tools according to BB permissions and require explicit consent in the Elephant Goldfish tab. The optional Advanced endpoint is a single tool-less model call containing only the persona, document standard, numbered document and chosen context files. You never write a reviewer report yourself or present your own critique as one.
 
 ## Steps
 
 1. **Target.** Ask for the spec path if it is not given (plain chat, one question). Register it with `egm_register_spec` (project-relative path). `egm_specs` lists what is registered.
-2. **Context.** Ask once whether the reviewers should get context files (source files or docs). Reviewers cannot open files themselves: only what is listed is sent. Files linked from the spec are not fetched automatically; list them if they matter.
+2. **Context.** Ask once whether the reviewers should get context files (source files or docs). Advanced endpoint reviewers cannot open files themselves: only what is listed is sent. BB workers retain their ordinary BB capabilities; files linked from the spec are not fetched automatically by the plugin.
 3. **Preset.** Ask the human to choose one (single question):
    - `full`: stages 5–9.
    - `feature_spec`: stages 5–8.
    - `implementation`: stage 9 only.
    - `custom`: chosen lenses (`design_critic`, `structural`, `style`, `codebase_details`, …) against one standard.
-4. **Start.** Call `egm_start_review` with `specId`, `preset`, `context`, and `maxRounds` (default 3). If it answers that Goldfish review is unavailable, tell the human exactly why and stop. Do not substitute your own review.
+4. **Start.** Call `egm_start_review` with `specId`, `preset`, `context`, and `maxRounds` (default 3). If the selected engine is unavailable, tell the human exactly why and stop. BB launches require recorded human consent in the tab; never substitute your own review or another engine.
 5. **Report, don't dump.** Tell the human the review runs in the **Elephant Goldfish** tab beside this thread, where stages, findings and reports show live. Reports are written under `.egm/reviews/`.
 6. **Resolve.** When `egm_review_status` shows findings, follow the **egm-resolve** skill.
 

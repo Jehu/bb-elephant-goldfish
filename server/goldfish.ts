@@ -28,6 +28,7 @@ export type GoldfishConfig = {
   timeoutMs: number;
 };
 
+
 export type GoldfishMessage = { role: "system" | "user"; content: string };
 
 export type GoldfishResult =
@@ -35,6 +36,7 @@ export type GoldfishResult =
   | { ok: false; error: string; kind: "cancelled" | "limit" | "failed" };
 
 export class GoldfishClient {
+  readonly engine = "goldfish" as const;
   private readonly config: () => Promise<GoldfishConfig | null>;
   private readonly fetchImpl: typeof fetch;
 
@@ -46,35 +48,21 @@ export class GoldfishClient {
   async status(): Promise<ReviewerStatus> {
     const config = await this.config();
     if (config === null) {
-      return {
-        ready: false,
-        reason: "No Goldfish endpoint is configured. Set the reviewer endpoint, model and key in the plugin settings.",
-        model: null,
-        endpoint: null,
-      };
+      return { engine: "goldfish", ready: false, reason: "No Advanced Goldfish endpoint is configured.", model: null, endpoint: null };
     }
     try {
-      const res = await this.fetchImpl(`${config.baseUrl}/models`, {
-        headers: { authorization: `Bearer ${config.apiKey}` },
-        signal: AbortSignal.timeout(5000),
-      });
-      if (!res.ok) {
-        return { ready: false, reason: `The reviewer endpoint answered HTTP ${res.status}.`, model: config.model, endpoint: config.baseUrl };
-      }
-      return { ready: true, reason: null, model: config.model, endpoint: config.baseUrl };
+      const res = await this.fetchImpl(`${config.baseUrl}/models`, { headers: { authorization: `Bearer ${config.apiKey}` }, signal: AbortSignal.timeout(5000) });
+      if (!res.ok) return { engine: "goldfish", ready: false, reason: `The reviewer endpoint answered HTTP ${res.status}.`, model: config.model, endpoint: config.baseUrl };
+      return { engine: "goldfish", ready: true, reason: null, model: config.model, endpoint: config.baseUrl };
     } catch (cause) {
-      return {
-        ready: false,
-        reason: `The reviewer endpoint cannot be reached: ${(cause as Error).message}`,
-        model: config.model,
-        endpoint: config.baseUrl,
-      };
+      return { engine: "goldfish", ready: false, reason: `The reviewer endpoint cannot be reached: ${(cause as Error).message}`, model: config.model, endpoint: config.baseUrl };
     }
   }
 
-  async complete(messages: GoldfishMessage[], signal: AbortSignal): Promise<GoldfishResult> {
-    const config = await this.config();
-    if (config === null) return { ok: false, kind: "failed", error: "no Goldfish endpoint is configured" };
+  async complete(messages: GoldfishMessage[], signal: AbortSignal, call?: { provider: string | null; model: string | null }): Promise<GoldfishResult> {
+    const liveConfig = await this.config();
+    if (liveConfig === null) return { ok: false, kind: "failed", error: "no Goldfish endpoint is configured" };
+    const config = call?.provider && call.model ? { ...liveConfig, baseUrl: call.provider, model: call.model } : liveConfig;
     const timeout = AbortSignal.timeout(config.timeoutMs);
     const combined = AbortSignal.any([signal, timeout]);
     let res: Response;

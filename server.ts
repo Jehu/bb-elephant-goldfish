@@ -21,6 +21,7 @@ import {
   type Spec,
 } from "./server/contract.ts";
 import { Engine, EngineError } from "./server/engine.ts";
+import { BbReviewer } from "./server/bb-reviewer.ts";
 import { GoldfishClient } from "./server/goldfish.ts";
 import { MIGRATIONS, Store } from "./server/store.ts";
 import { resolveInside, WorkspaceError } from "./server/workspace.ts";
@@ -34,6 +35,13 @@ const SKILL_NAMES = ["egm-brainstorm", "egm-draft", "egm-review", "egm-review-lo
 
 export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
+    reviewerEngine: {
+      type: "select",
+      label: "Reviewer engine",
+      description: "BB workers (default) can use tools and write according to BB permissions. Advanced endpoint is tool-less.",
+      default: "bb",
+      options: ["bb", "goldfish"],
+    },
     goldfishBaseUrl: {
       type: "string",
       label: "Goldfish endpoint",
@@ -71,13 +79,28 @@ export default async function plugin(bb: BbPluginApi) {
   const store = new Store(db);
 
   const goldfish = new GoldfishClient(async () => {
-    const s = await settings.get();
-    const baseUrl = s.goldfishBaseUrl.trim().replace(/\/+$/, "");
-    const model = s.goldfishModel.trim();
-    const apiKey = s.goldfishApiKey?.trim() || (s.goldfishApiKeyEnv.trim() ? process.env[s.goldfishApiKeyEnv.trim()] ?? "" : "");
+    const value = await settings.get();
+    const baseUrl = String(value.goldfishBaseUrl ?? "").trim().replace(/\/+$/, "");
+    const model = String(value.goldfishModel ?? "").trim();
+    const keyEnv = String(value.goldfishApiKeyEnv ?? "").trim();
+    const apiKey = String(value.goldfishApiKey ?? "").trim() || (keyEnv ? process.env[keyEnv] ?? "" : "");
     if (!baseUrl || !model || !apiKey) return null;
-    return { baseUrl, model, apiKey, timeoutMs: Math.max(10, s.goldfishTimeoutSeconds) * 1000 };
+    return { baseUrl, model, apiKey, timeoutMs: Math.max(10, Number(value.goldfishTimeoutSeconds ?? 300)) * 1000 };
   });
+  const bbReviewer = new BbReviewer(bb, async () => Math.max(10, Number((await settings.get()).goldfishTimeoutSeconds ?? 300)) * 1000);
+  const reviewer = async () => ((await settings.get()).reviewerEngine === "goldfish" ? goldfish : bbReviewer);
+  const snapshotReviewer = async (threadId: string | null) => {
+    const selected = await reviewer();
+    if (selected.engine === "goldfish") {
+      const value = await settings.get();
+      const baseUrl = String(value.goldfishBaseUrl ?? "").trim().replace(/\/+$/, "");
+      const model = String(value.goldfishModel ?? "").trim();
+      return { engine: "goldfish" as const, provider: baseUrl || null, model: model || null, environmentId: null };
+    }
+    const thread = threadId ? await bb.sdk.threads.get({ threadId }) : null;
+    const environmentId = thread?.environmentId ?? null;
+    return { engine: "bb" as const, provider: null, model: null, environmentId };
+  };
 
   // The plugin reads and writes spec files from the BB server process, so a
   // project counts only when one of its local sources exists on this machine.
@@ -90,10 +113,9 @@ export default async function plugin(bb: BbPluginApi) {
       return null;
     }
   };
-
   const changed = (projectId: string, specId: string | null) => bb.realtime.publish(CHANGED_CHANNEL, { projectId, specId });
 
-  const engine = new Engine({ store, goldfish, projectRoot, changed, log: bb.log });
+  const engine = new Engine({ store, goldfish, reviewer: () => bbReviewer, projectRoot, changed, log: bb.log });
   await engine.reconcile();
 
   const describeAll = async (projectId: string): Promise<Spec[]> => {
@@ -125,17 +147,27 @@ export default async function plugin(bb: BbPluginApi) {
     }
   };
 
+
   bb.rpc.register(rpcContract, {
     projects_list: async () => {
       const projects = await bb.sdk.projects.list();
       const out = [];
       for (const project of projects) {
-        if (project.kind !== "standard") continue;
         out.push({ id: project.id, name: project.name, root: await projectRoot(project.id) });
       }
       return { projects: out, current: null };
     },
-    reviewer_status: () => goldfish.status(),
+    consent_status: () => ({ granted: store.hasReviewerConsent(), warning: "BB reviewer workers are not read-only or sandboxed. They can run tools, including writes, subject only to BB's permission mode. Allow this installation to launch them?" }),
+    consent_grant: () => {
+      store.grantReviewerConsent();
+      return { granted: true, warning: "BB reviewer worker consent is recorded for this installation." };
+    },
+    consent_revoke: () => {
+      store.revokeReviewerConsent();
+      return { granted: false, warning: "BB reviewer worker consent was revoked; BB launches are refused until allowed again." };
+    },
+    reviewer_status: async () => (await (await reviewer()).status()),
+
     specs_list: ({ projectId }) =>
       guard(async () => ({ specs: await describeAll(projectId), root: await projectRoot(projectId) })),
     specs_register: ({ projectId, path }) =>
@@ -169,16 +201,19 @@ export default async function plugin(bb: BbPluginApi) {
         return { projectId: thread.projectId, specs, activeRuns };
       }),
     review_start: (input) =>
-      guard(() =>
-        engine.startRun(input.specId, {
+      guard(async () => {
+        const snapshot = await snapshotReviewer(input.threadId);
+        if (snapshot.engine === "bb" && !store.hasReviewerConsent()) throw new EngineError("BB reviewer consent is required in the Elephant Goldfish tab before launch.");
+        return engine.startRun(input.specId, {
           preset: input.preset,
           ...(input.lenses ? { lenses: input.lenses } : {}),
           ...(input.standard ? { standard: input.standard } : {}),
           context: input.context,
           maxRounds: input.maxRounds,
           threadId: input.threadId,
-        }),
-      ),
+          reviewer: snapshot,
+        });
+      }),
     review_cancel: ({ runId }) => guard(() => engine.cancelRun(runId)),
     finding_decide: ({ findingId, kind, rationale, opId }) =>
       guard(() => engine.decide(findingId, kind, rationale, "human", opId)),
@@ -255,8 +290,8 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "egm_start_review",
     description:
-      "Start a Goldfish review of a registered spec. Reviewers run as fresh, tool-less model calls outside this conversation. Presets: full (stages 5-9), feature_spec (5-8), implementation (9), brainstorm (six lenses, BRAINSTORM mode), custom (chosen lenses). Returns at once; poll egm_review_status.",
-    presentation: { label: { pending: "Starting Goldfish review", completed: "Started Goldfish review" } },
+      "Start a configured reviewer run. BB workers require recorded human consent because they can use tools; Advanced endpoint mode is tool-less.",
+    presentation: { label: { pending: "Starting review", completed: "Started review" } },
     parameters: z.object({
       specId: z.string(),
       preset: z.enum(PRESET_IDS),
@@ -267,7 +302,8 @@ export default async function plugin(bb: BbPluginApi) {
     }),
     async execute(params, { projectId, threadId }) {
       try {
-        requireProjectSpec(params.specId, projectId);
+        const snapshot = await snapshotReviewer(threadId);
+        if (snapshot.engine === "bb" && !store.hasReviewerConsent()) throw new EngineError("BB reviewer consent is required in the Elephant Goldfish tab before launch.");
         const run = await engine.startRun(params.specId, {
           preset: params.preset,
           ...(params.lenses ? { lenses: params.lenses } : {}),
@@ -275,6 +311,7 @@ export default async function plugin(bb: BbPluginApi) {
           context: params.context,
           maxRounds: params.maxRounds,
           threadId,
+          reviewer: snapshot,
         });
         return asText(run);
       } catch (cause) {
@@ -361,8 +398,9 @@ export default async function plugin(bb: BbPluginApi) {
       if (command !== "status") {
         return { exitCode: 2, stderr: "usage: bb egm status\n" };
       }
-      const status = await goldfish.status();
-      const lines = [`Goldfish: ${status.ready ? `ready (${status.model} at ${status.endpoint})` : `unavailable: ${status.reason}`}`];
+      const status = await (await reviewer()).status();
+      const engineLabel = status.engine === "bb" ? "BB workers" : "Advanced endpoint";
+      const lines = [`${engineLabel}: ${status.ready ? `ready${status.model ? ` (${status.model}${status.endpoint ? ` at ${status.endpoint}` : ""})` : ""}` : `unavailable: ${status.reason}`}`];
       if (ctx.projectId) {
         for (const spec of await describeAll(ctx.projectId)) {
           lines.push(

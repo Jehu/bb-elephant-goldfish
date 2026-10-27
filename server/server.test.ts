@@ -28,8 +28,8 @@ test("agent tools enforce project ownership", async () => {
     await plugin(bb as unknown as BbPluginApi);
     const store = new Store(db);
     store.insertSpec({ id: "spec-a", projectId: "a", path: "spec.md", title: "Spec", createdAt: 1 });
-    store.insertRun({ id: "run-a", specId: "spec-a", projectId: "a", preset: "implementation", round: 1, maxRounds: 1, state: "awaiting_decisions", stateReason: null, targetHash: "hash", context: [], threadId: "thread-a", parentRunId: null, reportDir: ".egm", createdAt: 1, finishedAt: null, stale: false });
-    store.insertStage({ id: "stage-a", runId: "run-a", round: 1, position: 1, lens: "structural", standard: "feature-spec-standard", state: "completed", provider: null, error: null, reportPath: null, startedAt: null, finishedAt: null });
+    store.insertRun({ id: "run-a", specId: "spec-a", projectId: "a", preset: "implementation", round: 1, maxRounds: 1, state: "awaiting_decisions", stateReason: null, targetHash: "hash", context: [], threadId: "thread-a", engine: "goldfish", provider: null, model: null, parentRunId: null, reportDir: ".egm", createdAt: 1, finishedAt: null, stale: false });
+    store.insertStage({ id: "stage-a", runId: "run-a", round: 1, position: 1, lens: "structural", standard: "feature-spec-standard", state: "completed", engine: "goldfish", provider: null, model: null, workerThreadId: null, error: null, reportPath: null, startedAt: null, finishedAt: null });
     store.insertFinding({ id: "finding-a", runId: "run-a", stageId: "stage-a", round: 1, lens: "structural", severity: "major", rawSeverity: "major", title: "Finding", body: "Body", lineStart: null, lineEnd: null, state: "open", decision: null, elephantNote: null, proposalId: null, createdAt: 1 }, "spec-a");
     const proposeSchema = schemas.get("egm_propose")!;
     const proposalParams = { specId: "spec-a", findingIds: ["finding-a"], content: "# Updated spec\n", summary: "Change" };

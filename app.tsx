@@ -35,6 +35,14 @@ import type {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { makePrompt, writePrompt, writePromptAfterSearch } from "./composer";
 
 const CHANGED = "egm-changed";
@@ -143,7 +151,7 @@ function useReviewer() {
   const [status, setStatus] = useState<ReviewerStatus | null>(null);
   useEffect(() => {
     rpc.call("reviewer_status").then(setStatus, (cause) =>
-      setStatus({ ready: false, reason: errorText(cause), model: null, endpoint: null }),
+      setStatus({ engine: "goldfish", ready: false, reason: errorText(cause), model: null, endpoint: null }),
     );
   }, [rpc]);
   return status;
@@ -151,16 +159,17 @@ function useReviewer() {
 
 function ReviewerBanner({ status }: { status: ReviewerStatus | null }) {
   if (status === null) return null;
+  const engine = status.engine === "bb" ? "BB" : "Goldfish";
   if (status.ready) {
     return (
       <p className="text-xs text-muted-foreground">
-        Goldfish: <span className="font-mono">{status.model}</span> — fresh context, no tools, read-only.
+        {engine}: <span className="font-mono">{status.model ?? "default model"}</span> — {status.engine === "bb" ? "ready; fresh BB worker per stage; can run tools, subject only to BB's permissions." : "ready; fresh context, no tools, read-only."}
       </p>
     );
   }
   return (
     <p className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-sm text-amber-700 dark:text-amber-400">
-      Goldfish review is unavailable: {status.reason}
+      {engine} review is unavailable: {status.reason ?? "not ready"}
     </p>
   );
 }
@@ -346,8 +355,41 @@ function StartReview({ spec, threadId, reviewer }: { spec: Spec; threadId: strin
   const [context, setContext] = useState("");
   const [maxRounds, setMaxRounds] = useState(3);
   const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const disabled = !reviewer?.ready || !spec.exists || busy || (preset === "custom" && lenses.length === 0);
+  const engineLabel = reviewer?.engine === "bb" ? "BB worker" : "Advanced endpoint";
+  const start = () => rpc.call("review_start", { specId: spec.id, preset, ...(preset === "custom" ? { lenses, standard } : {}), context: context.split(",").map((s) => s.trim()).filter(Boolean), maxRounds, threadId });
+  const requestStart = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (reviewer?.engine !== "bb") await start();
+      else {
+        const consent = await rpc.call("consent_status", null);
+        if (consent.granted) await start();
+        else setWarning(consent.warning);
+      }
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const grantConsentAndStart = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const consent = await rpc.call("consent_grant", null);
+      if (!consent.granted) throw new Error(consent.warning);
+      setWarning(null);
+      await start();
+    } catch (cause) {
+      setError(errorText(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <div className="space-y-2 rounded-md border p-3">
       <div className="flex flex-wrap gap-2">
@@ -413,34 +455,20 @@ function StartReview({ spec, threadId, reviewer }: { spec: Spec; threadId: strin
             className="h-8 w-16"
           />
         </label>
-        <Button
-          size="sm"
-          disabled={disabled}
-          onClick={() => {
-            setBusy(true);
-            rpc
-              .call("review_start", {
-                specId: spec.id,
-                preset,
-                ...(preset === "custom" ? { lenses, standard } : {}),
-                context: context
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-                maxRounds,
-                threadId,
-              })
-              .then(
-                () => setError(null),
-                (cause) => setError(errorText(cause)),
-              )
-              .finally(() => setBusy(false));
-          }}
-        >
-          Start Goldfish review
-        </Button>
+        <Button size="sm" disabled={disabled} onClick={requestStart}>Start {engineLabel} review</Button>
       </div>
+      {reviewer?.engine === "bb" && (
+        <button type="button" className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground" onClick={() => rpc.call("consent_revoke", null).catch((cause: unknown) => setError(errorText(cause)))}>
+          Revoke BB worker consent
+        </button>
+      )}
       <ErrorLine error={error} />
+      <Dialog open={warning !== null} onOpenChange={(open) => { if (!open && !busy) setWarning(null); }}>
+        <DialogContent hideCloseButton={busy}>
+          <DialogHeader><DialogTitle>Allow BB worker review?</DialogTitle><DialogDescription>{warning}</DialogDescription></DialogHeader>
+          <DialogFooter><Button variant="outline" disabled={busy} onClick={() => setWarning(null)}>Cancel</Button><Button disabled={busy} onClick={grantConsentAndStart}>Allow BB workers and start review</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -463,6 +491,9 @@ function RunCard({ run, stages, onCancel }: { run: Run; stages: Stage[]; onCance
         )}
       </div>
       {run.stateReason && <p className="text-xs text-muted-foreground">{run.stateReason}</p>}
+      <p className="text-xs text-muted-foreground">
+        Reviewer: {run.engine}{run.provider ? ` · ${run.provider}` : ""}{run.model ? ` · ${run.model}` : ""}{run.threadId ? ` · thread ${run.threadId}` : ""}
+      </p>
       <ol className="flex flex-wrap gap-1">
         {mine.map((stage) => (
           <li
@@ -477,6 +508,7 @@ function RunCard({ run, stages, onCancel }: { run: Run; stages: Stage[]; onCance
             )}
           >
             {stage.position + 1}. {LENS_LABEL[stage.lens]} · {stage.state}
+            <span className="text-muted-foreground"> · {stage.engine}{stage.provider ? ` · ${stage.provider}` : ""}{stage.model ? ` · ${stage.model}` : ""}{stage.workerThreadId ? ` · thread ${stage.workerThreadId}` : ""}</span>
             {stage.error ? ` — ${stage.error}` : ""}
           </li>
         ))}

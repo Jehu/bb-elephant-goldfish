@@ -137,6 +137,14 @@ export const MIGRATIONS: string[] = [
     created_at INTEGER NOT NULL,
     run_id TEXT REFERENCES runs(id)
   )`,
+  `ALTER TABLE runs ADD COLUMN engine TEXT NOT NULL DEFAULT 'goldfish';
+   ALTER TABLE runs ADD COLUMN provider TEXT;
+   ALTER TABLE runs ADD COLUMN model TEXT;
+   ALTER TABLE stages ADD COLUMN engine TEXT NOT NULL DEFAULT 'goldfish';
+   ALTER TABLE stages ADD COLUMN model TEXT;
+   ALTER TABLE stages ADD COLUMN worker_thread_id TEXT;
+   CREATE TABLE reviewer_consent (scope TEXT PRIMARY KEY, granted_at INTEGER NOT NULL);`,
+  `ALTER TABLE runs ADD COLUMN environment_id TEXT;`,
 ];
 
 export const newId = (): string => randomUUID().replace(/-/g, "").slice(0, 24);
@@ -153,11 +161,15 @@ type RunRow = {
   state_reason: string | null;
   target_hash: string;
   context_json: string;
+  environment_id: string | null;
   thread_id: string | null;
   parent_run_id: string | null;
   report_dir: string;
   created_at: number;
   finished_at: number | null;
+  engine: string;
+  provider: string | null;
+  model: string | null;
 };
 type StageRow = {
   id: string;
@@ -168,6 +180,9 @@ type StageRow = {
   standard: string;
   state: string;
   provider: string | null;
+  engine: string;
+  model: string | null;
+  worker_thread_id: string | null;
   error: string | null;
   report_path: string | null;
   raw_report: string | null;
@@ -273,6 +288,10 @@ const runFromRow = (r: RunRow): Run => ({
   stale: false,
   context: JSON.parse(r.context_json) as string[],
   threadId: r.thread_id,
+  environmentId: r.environment_id,
+  engine: r.engine as import("./contract.ts").ReviewerEngine,
+  provider: r.provider,
+  model: r.model,
   parentRunId: r.parent_run_id,
   reportDir: r.report_dir,
   createdAt: r.created_at,
@@ -287,7 +306,10 @@ const stageFromRow = (r: StageRow): Stage => ({
   lens: r.lens as LensId,
   standard: r.standard as StandardId,
   state: r.state as Stage["state"],
+  engine: r.engine as import("./contract.ts").ReviewerEngine,
   provider: r.provider,
+  model: r.model,
+  workerThreadId: r.worker_thread_id,
   error: r.error,
   reportPath: r.report_path,
   startedAt: r.started_at,
@@ -387,29 +409,13 @@ export class Store {
   // --- runs --------------------------------------------------------------
 
   insertRun(run: Run): void {
-    this.db
-      .prepare(
-        `INSERT INTO runs (id, spec_id, project_id, preset, round, max_rounds, state, state_reason, target_hash,
-          context_json, thread_id, parent_run_id, report_dir, created_at, finished_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        run.id,
-        run.specId,
-        run.projectId,
-        run.preset,
-        run.round,
-        run.maxRounds,
-        run.state,
-        run.stateReason,
-        run.targetHash,
-        JSON.stringify(run.context),
-        run.threadId,
-        run.parentRunId,
-        run.reportDir,
-        run.createdAt,
-        run.finishedAt,
-      );
+    this.db.prepare(
+      `INSERT INTO runs (id, spec_id, project_id, preset, round, max_rounds, state, state_reason, target_hash,
+        context_json, thread_id, environment_id, engine, provider, model, parent_run_id, report_dir, created_at, finished_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(run.id, run.specId, run.projectId, run.preset, run.round, run.maxRounds, run.state, run.stateReason,
+      run.targetHash, JSON.stringify(run.context), run.threadId, run.environmentId, run.engine, run.provider, run.model,
+      run.parentRunId, run.reportDir, run.createdAt, run.finishedAt);
   }
 
   getRun(runId: string): Run | null {
@@ -453,69 +459,45 @@ export class Store {
   // --- stages ------------------------------------------------------------
 
   insertStage(stage: Stage): void {
-    this.db
-      .prepare(
-        `INSERT INTO stages (id, run_id, round, position, lens, standard, state, provider, error, report_path, raw_report, started_at, finished_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
-      )
-      .run(
-        stage.id,
-        stage.runId,
-        stage.round,
-        stage.position,
-        stage.lens,
-        stage.standard,
-        stage.state,
-        stage.provider,
-        stage.error,
-        stage.reportPath,
-        stage.startedAt,
-        stage.finishedAt,
-      );
+    this.db.prepare(
+      `INSERT INTO stages (id, run_id, round, position, lens, standard, state, engine, provider, model, worker_thread_id, error, report_path, raw_report, started_at, finished_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(stage.id, stage.runId, stage.round, stage.position, stage.lens, stage.standard, stage.state,
+      stage.engine, stage.provider, stage.model, stage.workerThreadId, stage.error, stage.reportPath,
+      null, stage.startedAt, stage.finishedAt);
   }
 
   listStages(runId: string): Stage[] {
-    return this.db
-      .prepare<[string], StageRow>("SELECT * FROM stages WHERE run_id = ? ORDER BY position")
-      .all(runId)
-      .map(stageFromRow);
+    return this.db.prepare<[string], StageRow>("SELECT * FROM stages WHERE run_id = ? ORDER BY position").all(runId).map(stageFromRow);
   }
 
   listStagesForSpec(specId: string): Stage[] {
-    return this.db
-      .prepare<[string], StageRow>(
-        "SELECT s.* FROM stages s JOIN runs r ON r.id = s.run_id WHERE r.spec_id = ? ORDER BY r.created_at DESC, s.position",
-      )
-      .all(specId)
-      .map(stageFromRow);
+    return this.db.prepare<[string], StageRow>("SELECT s.* FROM stages s JOIN runs r ON r.id = s.run_id WHERE r.spec_id = ? ORDER BY r.created_at DESC, s.position").all(specId).map(stageFromRow);
   }
 
-  updateStage(
-    stageId: string,
-    patch: Partial<Pick<Stage, "state" | "provider" | "error" | "reportPath" | "startedAt" | "finishedAt">> & {
-      rawReport?: string;
-    },
-  ): void {
+  updateStage(stageId: string, patch: Partial<Pick<Stage, "state" | "provider" | "model" | "workerThreadId" | "error" | "reportPath" | "startedAt" | "finishedAt">> & { rawReport?: string }): void {
+    const map = { state: "state", provider: "provider", model: "model", workerThreadId: "worker_thread_id", error: "error", reportPath: "report_path", startedAt: "started_at", finishedAt: "finished_at", rawReport: "raw_report" };
     const sets: string[] = [];
     const values: unknown[] = [];
-    const map: Record<string, string> = {
-      state: "state",
-      provider: "provider",
-      error: "error",
-      reportPath: "report_path",
-      startedAt: "started_at",
-      finishedAt: "finished_at",
-      rawReport: "raw_report",
-    };
-    for (const [key, column] of Object.entries(map)) {
-      if (key in patch) {
-        sets.push(`${column} = ?`);
-        values.push((patch as Record<string, unknown>)[key]);
-      }
+    for (const [key, column] of Object.entries(map)) if (key in patch) {
+      sets.push(`${column} = ?`);
+      values.push((patch as Record<string, unknown>)[key]);
     }
     if (sets.length === 0) return;
     values.push(stageId);
     this.db.prepare(`UPDATE stages SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+  }
+
+  hasReviewerConsent(scope = "installation"): boolean {
+    return Boolean(this.db.prepare<[string], { scope: string }>("SELECT scope FROM reviewer_consent WHERE scope = ?").get(scope));
+  }
+
+  grantReviewerConsent(scope = "installation"): void {
+    this.db.prepare("INSERT OR REPLACE INTO reviewer_consent (scope, granted_at) VALUES (?, ?)").run(scope, Date.now());
+  }
+
+  revokeReviewerConsent(scope = "installation"): void {
+    this.db.prepare<[string]>("DELETE FROM reviewer_consent WHERE scope = ?").run(scope);
   }
 
   // --- findings ----------------------------------------------------------

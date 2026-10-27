@@ -119,6 +119,9 @@ export const specSchema = z.object({
 });
 export type Spec = z.infer<typeof specSchema>;
 
+export const reviewerEngineSchema = z.enum(["goldfish", "bb"]);
+export type ReviewerEngine = z.infer<typeof reviewerEngineSchema>;
+
 export const stageSchema = z.object({
   id,
   runId: id,
@@ -127,8 +130,11 @@ export const stageSchema = z.object({
   lens: z.enum(LENS_IDS),
   standard: z.enum(STANDARD_IDS),
   state: z.enum(STAGE_STATES),
-  /** Model and endpoint used, recorded when the stage ran. */
+  engine: reviewerEngineSchema,
+  /** Provider/model chosen when this stage was launched. */
   provider: z.string().nullable(),
+  model: z.string().nullable(),
+  workerThreadId: z.string().nullable(),
   error: z.string().nullable(),
   reportPath: z.string().nullable(),
   startedAt: z.number().nullable(),
@@ -196,15 +202,15 @@ export const runSchema = z.object({
   maxRounds: z.number(),
   state: z.enum(RUN_STATES),
   stateReason: z.string().nullable(),
-  /** Exact content hash the stages of this round reviewed. */
   targetHash: z.string(),
-  /** True when the file on disk no longer matches targetHash. */
   stale: z.boolean(),
-  /** Workspace-relative context files the reviewers were given. */
   context: z.array(relPath),
-  /** Thread that launched the run, when launched from a thread. */
   threadId: z.string().nullable(),
-  /** Run this one continued from (automatic next round). */
+  /** BB environment captured at launch; null for endpoint reviews. */
+  environmentId: z.string().nullable().optional(),
+  engine: reviewerEngineSchema,
+  provider: z.string().nullable(),
+  model: z.string().nullable(),
   parentRunId: id.nullable(),
   reportDir: z.string(),
   createdAt: z.number(),
@@ -223,6 +229,7 @@ export const eventSchema = z.object({
 export type EventRow = z.infer<typeof eventSchema>;
 
 export const reviewerStatusSchema = z.object({
+  engine: reviewerEngineSchema,
   ready: z.boolean(),
   reason: z.string().nullable(),
   model: z.string().nullable(),
@@ -241,6 +248,18 @@ export const rpcContract = defineRpcContract({
   reviewer_status: {
     input: z.null(),
     output: reviewerStatusSchema,
+  },
+  consent_status: {
+    input: z.null(),
+    output: z.object({ granted: z.boolean(), warning: z.string() }),
+  },
+  consent_grant: {
+    input: z.null(),
+    output: z.object({ granted: z.boolean(), warning: z.string() }),
+  },
+  consent_revoke: {
+    input: z.null(),
+    output: z.object({ granted: z.boolean(), warning: z.string() }),
   },
   specs_list: {
     input: z.object({ projectId }),

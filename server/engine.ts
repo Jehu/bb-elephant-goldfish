@@ -15,13 +15,15 @@ import {
   type LensId,
   type PresetId,
   type Proposal,
+  type ReviewerEngine,
+  type ReviewerStatus,
   type Run,
   type RunState,
   type Spec,
   type StandardId,
 } from "./contract.ts";
 import { unifiedDiff } from "./diff.ts";
-import type { GoldfishClient } from "./goldfish.ts";
+import type { GoldfishClient, GoldfishMessage, GoldfishResult } from "./goldfish.ts";
 import { parseFindings, presetStages, stageMessages, type ContextFile } from "./prompts.ts";
 import { newId, type SpecRecord, type Store } from "./store.ts";
 import {
@@ -37,9 +39,18 @@ import {
 
 export class EngineError extends Error {}
 
+export type ReviewerCall = { projectId: string; environmentId: string | null; provider: string | null; model: string | null; onWorkerThread?(threadId: string): void };
+export type ReviewEngine = {
+  readonly engine: ReviewerEngine;
+  status(): Promise<ReviewerStatus>;
+  complete(messages: GoldfishMessage[], signal: AbortSignal, call: ReviewerCall): Promise<GoldfishResult>;
+  cleanupWorker?(threadId: string): Promise<void>;
+};
+
 export type EngineDeps = {
   store: Store;
-  goldfish: GoldfishClient;
+  goldfish: ReviewEngine;
+  reviewer?: () => ReviewEngine;
   /** Absolute workspace root of a project on this BB server, or null. */
   projectRoot(projectId: string): Promise<string | null>;
   /** Tell open views something changed. */
@@ -47,6 +58,7 @@ export type EngineDeps = {
   log: { info(msg: string): void; warn(msg: string): void };
 };
 
+export type ReviewerSnapshot = { engine: ReviewerEngine; provider: string | null; model: string | null; environmentId: string | null };
 export type StartOptions = {
   preset: PresetId;
   lenses?: LensId[];
@@ -54,6 +66,7 @@ export type StartOptions = {
   context: string[];
   maxRounds: number;
   threadId: string | null;
+  reviewer?: ReviewerSnapshot;
 };
 
 const MAX_CONTEXT_BYTES = 400_000;
@@ -240,8 +253,6 @@ export class Engine {
     const { store } = this.deps;
     const spec = store.getSpec(specId);
     if (!spec) throw new EngineError("Unknown spec.");
-    const status = await this.deps.goldfish.status();
-    if (!status.ready) throw new EngineError(`Goldfish review is unavailable: ${status.reason}`);
     return this.withLock(spec.id, async () => {
       if (!store.getSpec(spec.id)) throw new EngineError("Unknown spec.");
       if (this.pendingProposals(spec.id).length) {
@@ -275,6 +286,12 @@ export class Engine {
       const round = parent ? parent.round + 1 : 1;
       const runId = newId();
       const stem = spec.path.replace(/\.md$/i, "").replaceAll("/", "__");
+      const engine = options.reviewer?.engine ?? this.deps.reviewer?.().engine ?? this.deps.goldfish.engine;
+      const reviewer = engine === "bb" ? this.deps.reviewer?.() : this.deps.goldfish;
+      if (!reviewer) throw new EngineError(`No ${engine} reviewer is available.`);
+      const reviewerStatus = await reviewer.status();
+      if (!reviewerStatus.ready) throw new EngineError(`${engine === "bb" ? "BB" : "Goldfish"} review is unavailable: ${reviewerStatus.reason}`);
+      if (engine === "bb" && !store.hasReviewerConsent()) throw new EngineError("BB reviewer consent was revoked; allow BB workers again in the Elephant Goldfish tab before launching.");
       const run: Run = {
         id: runId,
         specId: spec.id,
@@ -288,6 +305,10 @@ export class Engine {
         stale: false,
         context: options.context,
         threadId: options.threadId,
+        environmentId: options.reviewer?.environmentId ?? null,
+        engine,
+        provider: options.reviewer?.provider ?? null,
+        model: options.reviewer?.model ?? reviewerStatus.model,
         parentRunId,
         reportDir: `${REPORT_ROOT}/${stem}/${runId}`,
         createdAt: Date.now(),
@@ -306,18 +327,9 @@ export class Engine {
         store.supersedePendingProposals(spec.id, run.id);
         plans.forEach((plan, position) =>
           store.insertStage({
-            id: newId(),
-            runId,
-            round,
-            position,
-            lens: plan.lens,
-            standard: plan.standard,
-            state: "pending",
-            provider: null,
-            error: null,
-            reportPath: null,
-            startedAt: null,
-            finishedAt: null,
+            id: newId(), runId, round, position, lens: plan.lens, standard: plan.standard,
+            state: "pending", engine: run.engine, provider: run.provider, model: run.model,
+            workerThreadId: null, error: null, reportPath: null, startedAt: null, finishedAt: null,
           }),
         );
       });
@@ -384,7 +396,9 @@ export class Engine {
   }
 
   private async execute(spec: SpecRecord, run: Run, signal: AbortSignal): Promise<void> {
-    const { store, goldfish } = this.deps;
+    const { store } = this.deps;
+    const reviewer = run.engine === "bb" ? this.deps.reviewer?.() : this.deps.goldfish;
+    if (!reviewer) throw new EngineError(`No ${run.engine} reviewer is available for this run.`);
     const root = await this.root(spec.projectId);
     const context = await this.readContext(root, run.context);
     for (const note of context.notes) this.event(spec, run.id, "context", note);
@@ -407,6 +421,11 @@ export class Engine {
         store.updateStage(stage.id, { state: "skipped", finishedAt: Date.now() });
         return;
       }
+      if (run.engine === "bb" && !store.hasReviewerConsent()) {
+        store.updateStage(stage.id, { state: "failed", error: "BB reviewer consent was revoked", finishedAt: Date.now() });
+        if (!failure) failure = { state: "failed", reason: `${stage.lens} stage: BB reviewer consent was revoked; no BB worker was launched` };
+        return;
+      }
       store.updateStage(stage.id, { state: "running", startedAt: Date.now() });
       this.deps.changed(spec.projectId, spec.id);
       const messages = stageMessages({
@@ -417,7 +436,13 @@ export class Engine {
         context: context.files,
         earlierReports: parallel ? [] : stage.lens === "zoom_out" && stage.position > 0 ? [...reports] : [],
       });
-      const result = await goldfish.complete(messages, signal);
+      const result = await reviewer.complete(messages, signal, {
+        projectId: run.projectId,
+        environmentId: run.environmentId ?? null,
+        provider: run.provider,
+        model: run.model,
+        onWorkerThread: (workerThreadId) => store.updateStage(stage.id, { workerThreadId }),
+      });
       if (!result.ok) {
         const state = result.kind === "cancelled" ? "cancelled" : "failed";
         store.updateStage(stage.id, { state, error: result.error, finishedAt: Date.now() });
@@ -436,17 +461,17 @@ export class Engine {
       reports.push({ lens: stage.lens, text: result.text });
       const reportPath = `${run.reportDir}/round-${run.round}/${String(stage.position + 1).padStart(2, "0")}-${stage.lens}.md`;
       const header = [
-        `# Goldfish report: ${stage.lens}`,
+        `# ${run.engine === "bb" ? "BB worker" : "Advanced endpoint"} report: ${stage.lens}`,
         "",
         `- Spec: \`${spec.path}\``,
         `- Reviewed version: \`${run.targetHash}\``,
         `- Standard: \`${stage.standard}\``,
-        `- Model: \`${result.model}\` (tool-less, fresh context)`,
+        `- Model: \`${result.model}\`${run.engine === "bb" ? " (fresh BB worker; permissions are governed by BB)" : " (tool-less endpoint completion)"}`,
         result.truncated ? "- **The model stopped at its output limit; this report may be incomplete.**" : null,
         "",
         "---",
         "",
-      ].filter((l) => l !== null);
+      ].filter((line): line is string => line !== null);
       await writeReport(root, reportPath, header.join("\n") + result.text + "\n");
       if (signal.aborted) {
         store.updateStage(stage.id, { state: "cancelled", finishedAt: Date.now() });
@@ -455,38 +480,17 @@ export class Engine {
       const parsed = parseFindings(result.text);
       const now = Date.now();
       store.transaction(() => {
-        const items =
-          parsed ??
-          // Unparseable report: keep it whole as one finding so nothing is dropped silently.
-          [{ severity: "unknown" as const, rawSeverity: "(unparsed)", title: `Unstructured ${stage.lens} report`, body: result.text, lineStart: null, lineEnd: null }];
+        const items = parsed ?? [{ severity: "unknown" as const, rawSeverity: "(unparsed)", title: `Unstructured ${stage.lens} report`, body: result.text, lineStart: null, lineEnd: null }];
         for (const item of items) {
-          store.insertFinding(
-            {
-              id: newId(),
-              runId: run.id,
-              stageId: stage.id,
-              round: run.round,
-              lens: stage.lens,
-              severity: item.severity,
-              rawSeverity: item.rawSeverity,
-              title: item.title,
-              body: item.body,
-              lineStart: item.lineStart,
-              lineEnd: item.lineEnd,
-              state: "open",
-              decision: null,
-              elephantNote: null,
-              proposalId: null,
-              createdAt: now,
-            },
-            spec.id,
-          );
+          store.insertFinding({
+            id: newId(), runId: run.id, stageId: stage.id, round: run.round, lens: stage.lens,
+            severity: item.severity, rawSeverity: item.rawSeverity, title: item.title, body: item.body,
+            lineStart: item.lineStart, lineEnd: item.lineEnd, state: "open", decision: null,
+            elephantNote: null, proposalId: null, createdAt: now,
+          }, spec.id);
         }
         store.updateStage(stage.id, {
-          state: "completed",
-          provider: result.model,
-          reportPath,
-          rawReport: result.text,
+          state: "completed", provider: run.provider, model: result.model, reportPath, rawReport: result.text,
           finishedAt: now,
           ...(result.truncated ? { error: "output limit reached; report may be incomplete" } : {}),
         });
@@ -772,6 +776,7 @@ export class Engine {
     const stages = latest ? store.listStages(latest.id) : [];
     const options: StartOptions = latest ? {
       preset: latest.preset, context: latest.context, maxRounds: latest.maxRounds, threadId: latest.threadId,
+      reviewer: { engine: latest.engine, provider: latest.provider, model: latest.model, environmentId: latest.environmentId ?? null },
       ...(latest.preset === "custom" ? { lenses: stages.map((stage) => stage.lens), standard: stages[0]?.standard } : {}),
     } : { preset: "full", context: [], maxRounds: 3, threadId: proposal.author || null };
     store.deleteOtherPendingAdHocReviewTasks(spec.id, proposal.id);
@@ -858,6 +863,7 @@ export class Engine {
             context: run.context,
             maxRounds: run.maxRounds,
             threadId: run.threadId,
+            reviewer: { engine: run.engine, provider: run.provider, model: run.model, environmentId: run.environmentId ?? null },
             ...(run.preset === "custom" ? {
               lenses: store.listStages(runId).map((stage) => stage.lens),
               standard: store.listStages(runId)[0]?.standard,
@@ -922,19 +928,18 @@ export class Engine {
         // not_applied: the proposal stays proposed and may be applied again by the human.
         store.deleteApplyIntent(intent.proposalId);
       });
-      const spec = proposal ? store.getSpec(proposal.specId) : null;
-      if (spec) this.event(spec, proposal!.runId, "proposal.reconciled", result.reason);
     }
     for (const run of store.listRunsByState(["running"])) {
-      store.transaction(() => {
-        for (const stage of store.listStages(run.id)) {
-          if (stage.state === "running" || stage.state === "pending") {
-            store.updateStage(stage.id, { state: "failed", error: "interrupted by a BB restart", finishedAt: Date.now() });
-          }
-        }
-        store.setRunState(run.id, ["running"], "failed", "interrupted by a BB restart; partial results are kept", true);
-      });
       const spec = store.getSpec(run.specId);
+      const workerReviewer = run.engine === "bb" ? this.deps.reviewer?.() : this.deps.goldfish;
+      for (const stage of store.listStages(run.id)) {
+        if (stage.state !== "running" && stage.state !== "pending") continue;
+        if (stage.workerThreadId) await workerReviewer?.cleanupWorker?.(stage.workerThreadId).catch((cause: unknown) => {
+          this.deps.log.warn(`could not clean up BB reviewer worker ${stage.workerThreadId}: ${String(cause)}`);
+        });
+        store.updateStage(stage.id, { state: "failed", error: "interrupted by a BB restart", finishedAt: Date.now() });
+      }
+      store.setRunState(run.id, ["running"], "failed", "interrupted by a BB restart; partial results are kept", true);
       if (spec) this.event(spec, run.id, "run.failed", "Interrupted by a BB restart");
     }
     for (const run of store.listRunsByState(["awaiting_decisions", "completed"])) {

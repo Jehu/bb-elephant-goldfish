@@ -10,17 +10,22 @@ show reviews, findings, decisions and proposed changes together.
 - **Elephant**: your normal BB conversation. It knows the project and the
   decisions that led to the spec. It contests findings with a rationale or
   proposes a revised document.
-- **Goldfish**: a fresh, tool-less model call. It sees a reviewer persona, a
-  document standard, the numbered spec and the context files you chose. It
-  cannot read other files, run commands or change anything.
+- **BB workers (default)**: each stage launches a new BB worker thread in the
+  reviewed project's default (or selected thread) environment. Workers can use
+  tools and write according to BB's permission mode, so this mode requires
+  explicit installation-wide consent before the first launch.
+- **Advanced endpoint**: a fresh, tool-less OpenAI-compatible model call. It
+  receives only the reviewer persona, document standard, numbered spec and the
+  context files you chose; it cannot read other files, run commands or change
+  anything. Tool-call responses are rejected.
 - **You**: decide findings, inspect proposed changes and explicitly confirm
   application. Automatic re-review follows a successfully applied change.
 
-A hidden BB thread is **not** a sandbox. The installed BB permission modes
-cannot enforce read-only review, so Goldfish reviewers do not run as BB
-threads. They are single-turn OpenAI-compatible chat completions with no tools.
-An answer that attempts a tool call is rejected. The endpoint is trusted with
-whatever document and context you send it; choose it accordingly.
+BB worker threads are not a sandbox. Revoking BB's own permissions changes what
+workers can do; the plugin's consent records only that this installation may
+launch them. Advanced endpoint reviews never use BB worker consent and never
+fall back to BB workers. If the selected engine is unavailable, the launch is
+refused with its reported reason.
 
 ## Install
 
@@ -40,9 +45,20 @@ tab beside each conversation. Register an existing Markdown file to start.
 The seven skills appear in BB's skill menu; after installing or reloading,
 busy agent sessions get the new catalog only at the next safe session start.
 
-### Reviewer endpoint
+### Reviewer engines
 
-In the plugin settings, set:
+**BB workers** are the default and need no endpoint configuration. The launch
+dialog describes their tool/write risk; cancelling it neither records consent
+nor starts a review. The plugin stores each spawned worker ID with its stage,
+stops and archives it after completion, cancellation or timeout, and attempts
+the same cleanup during restart reconciliation.
+
+Consent is installation-wide and revocable at any time from the same tab
+(**Revoke BB worker consent**); revoked consent again refuses BB launches, including automatic next rounds, ad hoc re-reviews and restart continuations, and stops an in-flight run at its next stage without falling back to another engine.
+Advanced endpoint launches never consult or record it.
+
+**Advanced endpoint** is an optional tool-less mode. In the plugin settings,
+choose `goldfish` for **Reviewer engine**, then set:
 
 | Setting | Meaning |
 |---|---|
@@ -55,13 +71,14 @@ In the plugin settings, set:
 Example (the key itself belongs in the masked settings field):
 
 ```sh
+bb plugin config elephant-goldfish set reviewerEngine goldfish
 bb plugin config elephant-goldfish set goldfishBaseUrl http://127.0.0.1:20128/v1
 bb plugin config elephant-goldfish set goldfishModel auto/best-reasoning
 bb egm status
 ```
 
-With no configured or reachable endpoint, review launch is refused with a
-reason. The plugin does not substitute an Elephant critique and call it Goldfish.
+With no configured or reachable selected engine, review launch is refused with a
+reason. The plugin does not substitute an Elephant critique or another engine.
 
 ## Workflow
 
@@ -119,26 +136,19 @@ AST scan. The review engine always reviews the whole document; upstream's
 semantic-section scope is not exposed by this adaptation. Reviewer context is
 an explicit reading list: linked files and URLs are not fetched automatically.
 
-## Storage and safety
-
-- Specs remain ordinary Markdown files in the checkout.
-- Readable review reports are written under `.egm/reviews/<spec>/<run>/` with
-  the reviewed hash, stage, standard and model. These reports can be versioned.
-- Workflow state, raw reports, findings, proposals and apply intents live in
-  the plugin's SQLite database managed by BB (`bb.storage.database()`).
-- Targets must be project-relative regular files; traversal, symlinked files
-  and symlinked directory escapes are refused. Files over 2 MB are refused.
 - Context is capped at 20 files and 400,000 characters. Omitted/missing context
-  is recorded in the history; reviewers have no tools to fill the gaps.
+  is recorded in the history. Advanced endpoint reviewers have no tools to fill
+  the gaps; BB workers retain only BB's normal tool permissions.
 - Apply checks the proposal's base version, retains a backup, atomically replaces
   the file and checks the result. It does not lock external editors: a concurrent
   edit may be overwritten or omitted, including writes through an open handle.
   Coordinate other writers before applying.
 - After a restart, interrupted apply intents are reconciled from pre/post hashes;
-  interrupted reviews become failed with partial results kept. If neither hash
-  matches, the apply outcome is unknown, the backup is retained, and affected
-  findings are released for decisions. The plugin never blindly re-applies a
-  change.
+  interrupted reviews become failed with partial results kept. Persisted BB
+  worker IDs are best-effort stopped and archived before their interrupted
+  stages are marked failed. If neither hash matches, the apply outcome is
+  unknown, the backup is retained, and affected findings are released for
+  decisions. The plugin never blindly re-applies a change.
 - The plugin works with local project sources visible to the BB server. It
   does not currently read or apply specs on another enrolled machine.
   Workspace choices must correspond to the same authorized local checkout for

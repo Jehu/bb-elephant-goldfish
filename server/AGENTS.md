@@ -18,8 +18,12 @@ spec changes for the Elephant Goldfish BB plugin.
 
 ## Local Contracts
 
-- Goldfish has no tools or conversation history. Never replace it with a BB
-  thread whose read-only behavior cannot be enforced.
+- Advanced endpoint reviews have no tools or conversation history; reject tool-call
+  responses. BB-worker reviews are intentionally distinct: they require explicit
+  consent, use the run's captured project/environment, obey BB permissions, and
+  persist each worker ID for stop/archive cleanup and restart reconciliation.
+- Runs select their reviewer engine at launch and continuations retain that
+  selection; never silently fall back between BB workers and the endpoint.
 - Confirmed proposal apply checks the base version, retains a backup, atomically
   replaces the target and checks the result. Restart reconciles apply intents,
   including their operation receipts; an unknown outcome retains the backup and

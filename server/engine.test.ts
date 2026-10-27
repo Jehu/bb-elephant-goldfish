@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import Database from "better-sqlite3";
-import { Engine } from "./engine.ts";
+import { Engine, type ReviewEngine, type ReviewerCall } from "./engine.ts";
 import { GoldfishClient } from "./goldfish.ts";
 import { MIGRATIONS, Store } from "./store.ts";
 import { sha256 } from "./workspace.ts";
@@ -54,7 +54,7 @@ function fakeEndpoint(replies: Reply[]) {
 
 const FINDING = (title: string, severity = "major") => `### FINDING\nseverity: ${severity}\nlines: 1-2\ntitle: ${title}\nBecause reasons.\n`;
 
-async function setup(replies: Reply[], options: { configured?: boolean } = {}) {
+async function setup(replies: Reply[], options: { configured?: boolean; bb?: () => ReviewEngine } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "egm-eng-")));
   await fs.mkdir(path.join(root, "docs"), { recursive: true });
   await fs.writeFile(path.join(root, "docs/spec.md"), "# Spec\n\nFirst version.\n");
@@ -70,6 +70,7 @@ async function setup(replies: Reply[], options: { configured?: boolean } = {}) {
   const engine = new Engine({
     store,
     goldfish,
+    reviewer: options.bb,
     projectRoot: async () => root,
     changed: () => {},
     log: { info: () => {}, warn: () => {} },
@@ -845,3 +846,88 @@ for (const terminal of ["failed", "cancelled"] as const) {
     assert.equal(store.getRun(run.id)!.stateReason, original.stateReason);
   });
 }
+
+/** Fake BB reviewer: records each worker launch, honors a gate on the first one. */
+function fakeBb(replies: string[], firstGate?: Promise<void>) {
+  const launches: { provider: string | null; model: string | null; environmentId: string | null }[] = [];
+  const waiters: { n: number; resolve: () => void }[] = [];
+  const reviewer: ReviewEngine = {
+    engine: "bb",
+    status: async () => ({ engine: "bb", ready: true, reason: null, model: null, endpoint: null }),
+    complete: async (_messages, _signal, call: ReviewerCall) => {
+      launches.push({ provider: call.provider, model: call.model, environmentId: call.environmentId });
+      for (const w of waiters.filter((w) => launches.length >= w.n)) w.resolve();
+      if (launches.length === 1 && firstGate) await firstGate;
+      return { ok: true, text: replies.shift() ?? "NO FINDINGS", model: call.model ?? "bb-worker", truncated: false };
+    },
+  };
+  const started = (n: number): Promise<void> => {
+    if (launches.length >= n) return Promise.resolve();
+    const { promise, resolve } = Promise.withResolvers<void>();
+    waiters.push({ n, resolve });
+    return promise;
+  };
+  return { launches, started, reviewer: () => reviewer };
+}
+
+test("revoking BB consent mid-run fails the next stage with no fallback and pins intact", async () => {
+  const gate = Promise.withResolvers<void>();
+  const bb = fakeBb([FINDING("Gap A")], gate.promise);
+  const { engine, spec, store, endpoint } = await setup([], { bb: bb.reviewer });
+  store.grantReviewerConsent();
+  const run = await engine.startRun(spec.id, { preset: "full", context: [], maxRounds: 3, threadId: null });
+  await bb.started(1);
+  store.revokeReviewerConsent();
+  gate.resolve();
+  await engine.settle();
+  const failed = store.getRun(run.id)!;
+  assert.equal(failed.state, "failed");
+  assert.match(failed.stateReason ?? "", /consent was revoked; no BB worker was launched/);
+  assert.equal(bb.launches.length, 1);
+  assert.equal(endpoint.requests.length, 0);
+  const stages = store.listStages(run.id);
+  assert.equal(stages.filter((s) => s.state === "completed").length, 1);
+  assert.equal(stages.filter((s) => s.state === "failed" && s.error === "BB reviewer consent was revoked").length, 1);
+  assert.equal(stages.filter((s) => s.state === "skipped").length, stages.length - 2);
+  assert.equal(stages[0]!.model, "bb-worker");
+  assert.equal(stages[0]!.provider, null);
+});
+
+test("revoking BB consent after the first round blocks the automatic next round", async () => {
+  const bb = fakeBb([FINDING("Gap A")]);
+  const { engine, spec, store, review } = await setup([], { bb: bb.reviewer });
+  store.grantReviewerConsent();
+  const run = await review("implementation");
+  const [finding] = store.listFindingsForRun(run.id);
+  const proposal = await engine.propose(spec.id, [finding!.id], "# Spec\n\nSecond version.\n", "cover gap A", "thr_1");
+  store.revokeReviewerConsent();
+  await engine.applyProposal(proposal.id, proposal.baseHash, "op-apply");
+  await engine.settle();
+  const failed = store.getRun(run.id)!;
+  assert.equal(failed.state, "failed");
+  assert.match(failed.stateReason ?? "", /next round could not start: BB reviewer consent was revoked/);
+  assert.equal(store.listRuns(spec.id).filter((child) => child.parentRunId === run.id).length, 0);
+  assert.equal(bb.launches.length, 1);
+});
+
+test("revoking BB consent blocks restart reconciliation continuations", async () => {
+  const bb = fakeBb([FINDING("Gap A")]);
+  const { root, engine, spec, store, review } = await setup([], { bb: bb.reviewer });
+  store.grantReviewerConsent();
+  const run = await review("implementation");
+  const [finding] = store.listFindingsForRun(run.id);
+  const content = "# Spec\n\nApplied.\n";
+  const proposal = await engine.propose(spec.id, [finding!.id], content, "fix", "thr");
+  await fs.writeFile(path.join(root, "docs/spec.md"), content);
+  store.setProposalState(proposal.id, ["proposed"], "applied", "recovered", { appliedAt: Date.now() });
+  store.setFindingState(finding!.id, "fixed");
+  store.setRunState(run.id, ["awaiting_decisions"], "completed", "continued in round 2", true);
+  store.revokeReviewerConsent();
+  await engine.reconcile();
+  await engine.settle();
+  const failed = store.getRun(run.id)!;
+  assert.equal(failed.state, "failed");
+  assert.match(failed.stateReason ?? "", /next round could not start: BB reviewer consent was revoked/);
+  assert.equal(store.listRuns(spec.id).filter((child) => child.parentRunId === run.id).length, 0);
+  assert.equal(bb.launches.length, 1);
+});

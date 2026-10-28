@@ -33,18 +33,3 @@ export function writePrompt(
   });
   return result;
 }
-
-/** Wait for workspace validation without writing after cancellation. */
-export async function writePromptAfterSearch(
-  composer: PluginComposerApi | null | undefined,
-  threadId: string,
-  prompt: string,
-  append: boolean,
-  isCurrent: () => boolean,
-  signal: AbortSignal,
-  search: () => Promise<unknown>,
-): Promise<"written" | "confirm" | null> {
-  await search();
-  if (signal.aborted) return null;
-  return writePrompt(composer, threadId, prompt, append, () => !signal.aborted && isCurrent());
-}

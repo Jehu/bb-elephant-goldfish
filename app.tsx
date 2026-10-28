@@ -44,7 +44,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { makePrompt, writePrompt, writePromptAfterSearch } from "./composer";
+import { makePrompt, writePrompt } from "./composer";
 import { egmLink, parseTargetPath, targetPath, targetSchema, type EgmTarget } from "./lib/egm-links";
 
 const CHANGED = "egm-changed";
@@ -964,36 +964,24 @@ function ThreadTab({ threadId, target }: { threadId: string; target?: EgmTarget 
   const composer = useComposer();
   const currentThread = useRef<string | null>(threadId);
   currentThread.current = threadId;
-  const draftOperation = useRef<AbortController | null>(null);
-  useEffect(() => { currentThread.current = threadId; return () => { currentThread.current = null; draftOperation.current?.abort(); }; }, [threadId]);
-  const [pending, setPending] = useState<{ threadId: string; prompt: string; contextual: boolean } | null>(null);
+  useEffect(() => { currentThread.current = threadId; return () => { currentThread.current = null; }; }, [threadId]);
+  const [pending, setPending] = useState<{ threadId: string; prompt: string } | null>(null);
   const [draftError, setDraftError] = useState<string | null>(null);
   const [draftMessage, setDraftMessage] = useState<string | null>(null);
   useEffect(() => { setPending(null); setDraftError(null); setDraftMessage(null); setProjectId(null); }, [threadId]);
-  const commitDraft = async (target: string, prompt: string, append: boolean, contextual: boolean) => {
-    draftOperation.current?.abort();
-    const operation = new AbortController();
-    draftOperation.current = operation;
+  const commitDraft = (target: string, prompt: string, append: boolean) => {
     try {
-      const isCurrent = () => currentThread.current === target;
-      const result = contextual
-        ? await writePromptAfterSearch(composer, target, prompt, append, isCurrent, operation.signal, () => rpc.call("workspace_search", { threadId: target, query: "" }))
-        : writePrompt(composer, target, prompt, append, () => !operation.signal.aborted && isCurrent());
-      if (operation.signal.aborted || result === null) return;
-      if (result === "confirm") setPending({ threadId: target, prompt, contextual });
+      const result = writePrompt(composer, target, prompt, append, () => currentThread.current === target);
+      if (result === "confirm") setPending({ threadId: target, prompt });
       else { setPending(null); setDraftMessage("Request added to the composer. Review it and send when ready."); }
       setDraftError(null);
     } catch (cause) {
-      if (!operation.signal.aborted && currentThread.current === target) setDraftError(`${errorText(cause)} Open the matching thread composer and try again.`);
+      if (currentThread.current === target) setDraftError(`${errorText(cause)} Open the matching thread composer and try again.`);
     }
   };
   const draft: DraftRequest = (instruction, data) => {
     setDraftMessage(null);
-    void commitDraft(threadId, makePrompt(instruction, data), false, false);
-  };
-  const draftContextual: DraftRequest = (instruction, data) => {
-    setDraftMessage(null);
-    void commitDraft(threadId, makePrompt(instruction, data), false, true);
+    commitDraft(threadId, makePrompt(instruction, data), false);
   };
   const [projectId, setProjectId] = useState<string | null>(null);
   const [active, setActive] = useState<Run[]>([]);
@@ -1027,9 +1015,9 @@ function ThreadTab({ threadId, target }: { threadId: string; target?: EgmTarget 
       <ErrorLine error={error} />
       <ErrorLine error={draftError} />
       {draftMessage && <p role="status" className="text-xs text-muted-foreground">{draftMessage}</p>}
-      {pending && pending.threadId === threadId && <div className="space-y-2 rounded-md bg-muted/50 p-3"><p className="text-sm">The composer already has a draft. Append this request to its latest contents, or cancel without changing it?</p><div className="flex gap-2"><Button size="sm" onClick={() => void commitDraft(pending.threadId, pending.prompt, true, pending.contextual)}>Append</Button><Button size="sm" variant="ghost" onClick={() => { draftOperation.current?.abort(); setPending(null); setDraftError(null); }}>Cancel</Button></div></div>}
+      {pending && pending.threadId === threadId && <div className="space-y-2 rounded-md bg-muted/50 p-3"><p className="text-sm">The composer already has a draft. Append this request to its latest contents, or cancel without changing it?</p><div className="flex gap-2"><Button size="sm" onClick={() => commitDraft(pending.threadId, pending.prompt, true)}>Append</Button><Button size="sm" variant="ghost" onClick={() => { setPending(null); setDraftError(null); }}>Cancel</Button></div></div>}
       {!target && <GuidedRequest key={threadId} threadId={threadId} onDraft={draft} />}
-      {projectId && <Workspace key={`workspace:${threadId}`} projectId={projectId} threadId={threadId} onDraft={draftContextual} target={target} />}
+      {projectId && <Workspace key={`workspace:${threadId}`} projectId={projectId} threadId={threadId} onDraft={draft} target={target} />}
     </div>
   );
 }

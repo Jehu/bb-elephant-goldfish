@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ComposerDraftSnapshot, PluginComposerApi } from "@get-bb/plugin-sdk/app";
-import { makePrompt, writePrompt, writePromptAfterSearch } from "../composer.ts";
+import { makePrompt, writePrompt } from "../composer.ts";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 
@@ -61,6 +61,47 @@ function composer(initial = empty()) {
 
 const current = () => true;
 
+test("proposal drafts work when the thread checkout differs from the server checkout", async () => {
+  const source = ts.createSourceFile("app.tsx", readFileSync(new URL("../app.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const threadTab = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "ThreadTab");
+  assert.ok(threadTab);
+  const c = composer();
+  const calls: string[] = [];
+  let stateIndex = 0;
+  const Workspace = () => {};
+  const placeholder = () => {};
+  const bindings = {
+    React: { createElement: (type: unknown, props: Record<string, unknown>, ...children: unknown[]) => ({ type, props, children }) },
+    useRpc: () => ({ call: async (method: string) => {
+      calls.push(method);
+      throw new Error("Thread workspace does not match the server's available project checkout.");
+    } }),
+    useBbNavigate: () => ({}),
+    useComposer: () => c.api,
+    useRef: (current: unknown) => ({ current }),
+    useState: (initial: unknown) => [++stateIndex === 4 ? "project" : initial, () => {}],
+    useEffect: () => {},
+    useCallback: (callback: unknown) => callback,
+    useRealtime: () => {},
+    CHANGED: "egm-changed",
+    Workspace, GuidedRequest: placeholder, ErrorLine: placeholder, Mark: placeholder, Button: placeholder,
+    makePrompt, writePrompt,
+    errorText: (cause: Error) => cause.message,
+  };
+  const code = ts.transpileModule(threadTab.getText(source), { compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ESNext } }).outputText;
+  const render = new Function(...Object.keys(bindings), `${code}\nreturn ThreadTab;`)(...Object.values(bindings));
+  const view = render({ threadId: "thread-1" });
+  const workspace = view.children.find((child: { type?: unknown } | null) => child?.type === Workspace);
+  assert.ok(workspace);
+  workspace.props.onDraft("Review the proposed diff; do not apply it.", { proposalId: "proposal", diff: "-old\n+new" });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.match(c.draft.text, /Review the proposed diff/);
+  assert.match(c.draft.text, /proposalId/);
+  assert.deepEqual(calls, [], "drafting an existing proposal needs no workspace search");
+  assert.equal(c.submissions, 0);
+});
+
 test("empty composer receives a prompt without sending", () => {
   const c = composer();
   assert.equal(writePrompt(c.api, "thread-1", "request", false, current), "written");
@@ -92,20 +133,6 @@ test("append uses the latest draft and preserves mention offsets and attachments
   c.draft = { text: "new: @thread", mentions: [mention], attachments: [attachment] };
   assert.equal(writePrompt(c.api, "thread-1", "request", true, current), "written");
   assert.deepEqual(c.draft, { text: "new: @thread\n\nrequest", mentions: [mention], attachments: [attachment] });
-  assert.equal(c.submissions, 0);
-});
-
-test("cancelling an in-flight contextual append prevents the awaited search from writing", async () => {
-  const original = { ...empty(), text: "existing" };
-  const c = composer(original);
-  const controller = new AbortController();
-  const { promise: search, resolve: resolveSearch } = Promise.withResolvers<void>();
-  const pending = writePromptAfterSearch(c.api, "thread-1", "request", true, current, controller.signal, () => search);
-  controller.abort();
-  resolveSearch();
-  assert.equal(await pending, null);
-  assert.deepEqual(c.draft, original);
-  assert.equal(c.replacements, 0);
   assert.equal(c.submissions, 0);
 });
 

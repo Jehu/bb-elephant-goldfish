@@ -123,7 +123,10 @@ rendered.
    An agreed change need not address a finding: pass `findingIds: []` rather
    than inventing one. Every proposal is bound to the spec snapshot it read.
 6. Inspect the diff and explicitly confirm **Apply change**. Coordinate with
-   other editors: the version check does not lock them out.
+   other editors: the version check does not lock them out. Applying from the
+   proposal's own thread tab also drafts a short notification into that
+   thread's composer, so the agent learns the change was applied once you send
+   it; nothing is sent automatically.
 7. After an applied change, once no finding remains unresolved, the next round
    starts automatically only if the file still matches the applied version. An
    ad hoc change is re-reviewed once outstanding findings are resolved, including

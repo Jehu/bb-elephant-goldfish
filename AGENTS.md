@@ -78,6 +78,8 @@ Default section order:
 
 When the user requests a durable behavior change, record it here or in the relevant child AGENTS.md
 
+- Review limit badges name the specific cause (rounds, output, rate limit or timeout) in both the overview and review details; retain the detailed reason.
+
 ## Project Guidance
 
 - This repository implements a BB spec workspace adapting `google/elephant-goldfish-model`; see `README.md` for installation and workflows.

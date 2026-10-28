@@ -124,11 +124,12 @@ test("a reviewer answer that calls a tool is discarded and the run fails, never 
 });
 
 test("a rate-limited reviewer ends the run as limit_reached with partial results kept", async () => {
-  const { store, review } = await setup([{ content: FINDING("Gap A") }, { status: 429 }]);
+  const { engine, spec, store, review } = await setup([{ content: FINDING("Gap A") }, { status: 429 }]);
   const run = await review("feature_spec");
   assert.equal(run.state, "limit_reached");
   assert.deepEqual(store.listStages(run.id).map((s) => s.state), ["completed", "failed", "skipped", "skipped"]);
   assert.equal(store.listFindingsForRun(run.id).length, 1);
+  assert.equal((await engine.describeSpec(spec)).spec.latestRun!.stateReason, run.stateReason);
 });
 
 test("decisions resolve findings; trade-offs need a reason and stay distinct from dismissals", async () => {

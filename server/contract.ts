@@ -107,6 +107,7 @@ export const specSchema = z.object({
     .object({
       id,
       state: z.enum(RUN_STATES),
+      stateReason: z.string().nullable(),
       targetHash: z.string(),
       stale: z.boolean(),
       round: z.number(),

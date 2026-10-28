@@ -210,6 +210,7 @@ export class Engine {
           ? {
               id: latest.id,
               state: latest.state,
+              stateReason: latest.stateReason,
               targetHash: latest.targetHash,
               stale: this.isStale(latest, hash),
               round: latest.round,

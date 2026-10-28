@@ -45,6 +45,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { makePrompt, writePrompt } from "./composer";
+import { reviewLimitLabel } from "./lib/review-limit";
 import { egmLink, parseTargetPath, targetPath, targetSchema, type EgmTarget } from "./lib/egm-links";
 
 const CHANGED = "egm-changed";
@@ -69,7 +70,7 @@ const RUN_LABEL: Record<RunState, string> = {
   completed: "Completed",
   failed: "Failed",
   cancelled: "Cancelled",
-  limit_reached: "Limit reached",
+  limit_reached: "Review stopped at a limit",
   stale: "Stopped: document changed",
   unknown: "Unknown",
 };
@@ -165,8 +166,8 @@ function HostMark({ className }: { className?: string }) {
   );
 }
 
-function Badge({ className, children }: { className?: string; children: ReactNode }) {
-  return <span className={cn("inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium", className)}>{children}</span>;
+function Badge({ className, children, title }: { className?: string; children: ReactNode; title?: string }) {
+  return <span title={title} className={cn("inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium", className)}>{children}</span>;
 }
 
 function Section({ title, children, actions }: { title: ReactNode; children: ReactNode; actions?: ReactNode }) {
@@ -304,7 +305,7 @@ function SpecRow({ spec, onOpen }: { spec: Spec; onOpen: () => void }) {
         {!spec.exists && <Badge className="bg-red-500/15 text-red-600">File missing</Badge>}
         {run ? (
           <>
-            <Badge className={RUN_TONE[run.state]}>{RUN_LABEL[run.state]}</Badge>
+            <Badge className={RUN_TONE[run.state]} title={run.stateReason ?? undefined}>{run.state === "limit_reached" ? reviewLimitLabel(run.stateReason) : RUN_LABEL[run.state]}</Badge>
             {run.stale && run.state !== "running" && <Badge className="bg-orange-500/15 text-orange-700">Outdated</Badge>}
           </>
         ) : (
@@ -494,7 +495,7 @@ function RunCard({ run, stages, onCancel }: { run: Run; stages: Stage[]; onCance
     <div className="space-y-2 border-l-2 border-l-border pl-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium">Round {run.round}</span>
-        <Badge className={RUN_TONE[run.state]}>{RUN_LABEL[run.state]}</Badge>
+        <Badge className={RUN_TONE[run.state]} title={run.stateReason ?? undefined}>{run.state === "limit_reached" ? reviewLimitLabel(run.stateReason) : RUN_LABEL[run.state]}</Badge>
         {run.stale && <Badge className="bg-orange-500/15 text-orange-700">Reviewed an older version</Badge>}
         <span className="text-xs text-muted-foreground">
           {run.preset} · version <span className="font-mono">{run.targetHash.slice(0, 10)}</span> · {time(run.createdAt)}

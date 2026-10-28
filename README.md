@@ -47,6 +47,10 @@ bb plugin install . --yes
 
 The **Spec workspace** page appears in the sidebar, and an **Elephant Goldfish**
 tab beside each conversation. Register an existing Markdown file to start.
+Agent responses can include **Open document**, **View finding** and **Review
+proposed change** links. Clicking opens the exact item in a thread detail tab,
+including resolved findings and older proposals. A copied link opens the same
+item on the Spec workspace page. Opening a link never applies a change.
 The seven skills appear in BB's skill menu; after installing or reloading,
 busy agent sessions get the new catalog only at the next safe session start.
 

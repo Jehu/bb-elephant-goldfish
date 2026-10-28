@@ -10,7 +10,10 @@ test("thread composer and workspace have distinct sibling keys", () => {
   let keys: string[] | undefined;
   const visit = (node: ts.Node) => {
     if (ts.isJsxElement(node)) {
-      const children = node.children.filter((child): child is ts.JsxSelfClosingElement => ts.isJsxSelfClosingElement(child));
+      const children = node.children.flatMap((child) => {
+        const element = ts.isJsxExpression(child) && child.expression && ts.isBinaryExpression(child.expression) ? child.expression.right : child;
+        return ts.isJsxSelfClosingElement(element) ? [element] : [];
+      });
       const guided = children.find((child) => child.tagName.getText(source) === "GuidedRequest");
       if (guided) {
         const workspace = node.children.flatMap((child) => {

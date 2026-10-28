@@ -17,6 +17,7 @@ test("agent tools enforce project ownership", async () => {
   const schemas = new Map<string, { safeParse: (value: unknown) => { success: boolean } }>();
   let rpc: Record<string, (params: Record<string, unknown>) => Promise<unknown>> = {};
   const bb = {
+    pluginId: "elephant-goldfish",
     settings: { define: () => ({ get: async () => ({ goldfishBaseUrl: "", goldfishModel: "", goldfishApiKey: "", goldfishApiKeyEnv: "", goldfishTimeoutSeconds: 30 }) }) },
     storage: { database: () => db, migrate: (_db: unknown, migrations: string[]) => migrations.forEach((sql) => db.exec(sql)) },
     sdk: { projects: { get: async () => ({ sources: [{ type: "local_path", path: root, isDefault: true }] }) }, threads: { get: async ({ threadId }: { threadId: string }) => ({ projectId: threadId === "thread-a" ? "a" : "other" }) } },
@@ -63,7 +64,14 @@ test("agent tools enforce project ownership", async () => {
     const foreignThread = await tools.get("egm_start_review")!({ specId: "spec-a", preset: "implementation", context: [], maxRounds: 1 }, { projectId: "a", threadId: "thread-b" }) as { isError?: boolean };
     assert.equal(foreignThread.isError, true);
     assert.equal(typeof status, "string");
-    const proposed = JSON.parse(await tools.get("egm_propose")!({ specId: "spec-a", findingIds: ["finding-a"], content: "# Updated spec\n", summary: "Change" }, { projectId: "a", threadId: "thread-a" }) as string) as { id: string; baseHash: string };
+    const statusData = JSON.parse(status as string);
+    assert.equal(statusData.spec.link.url, "/plugins/elephant-goldfish/specs/a/spec-a");
+    assert.match(statusData.findings[0].link.directive, /findingId="finding-a"/);
+    const proposed = JSON.parse(await tools.get("egm_propose")!({ specId: "spec-a", findingIds: ["finding-a"], content: "# Updated spec\n", summary: "Change" }, { projectId: "a", threadId: "thread-a" }) as string) as { id: string; baseHash: string; link: { url: string; directive: string } };
+    assert.equal(proposed.link.url, `/plugins/elephant-goldfish/specs/a/spec-a/proposal/${proposed.id}`);
+    assert.match(proposed.link.directive, /::egm-open\{projectId="a" specId="spec-a" proposalId="/);
+    assert.equal(store.getProposal(proposed.id)!.state, "proposed");
+    assert.equal(await fs.readFile(path.join(root, "spec.md"), "utf8"), "# Spec\n");
     const target = path.join(root, "spec.md");
     const backup = path.join(root, "backup.md");
     const staged = path.join(root, "staged.md");

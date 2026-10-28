@@ -6,6 +6,9 @@ Your design documents stay as Markdown files in your project checkout. A
 **Spec workspace** page in the sidebar lists the registered specs of each
 project, and an **Elephant Goldfish** tab beside each conversation shows the
 same reviews, findings and proposals inside the thread where the work happens.
+Links in agent responses open a specific document, finding or proposed diff
+in a thread detail tab. Copied links open the same item on the workspace page;
+opening a link does not apply a change.
 Seven agent skills (brainstorm, draft, staged review, review loop, resolve,
 drift report, bootstrap) cover the workflow from idea to reviewed document.
 

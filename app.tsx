@@ -10,6 +10,7 @@ import {
   Markdown,
   definePluginApp,
   experimental_Diff as Diff,
+  experimental_usePluginId,
   useBbNavigate,
   useRealtime,
   useBbContext,
@@ -44,6 +45,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { makePrompt, writePrompt, writePromptAfterSearch } from "./composer";
+import { egmLink, parseTargetPath, targetPath, targetSchema, type EgmTarget } from "./lib/egm-links";
 
 const CHANGED = "egm-changed";
 
@@ -585,8 +587,8 @@ function DecisionButtons({ finding, disabled, onDecide }: { finding: Finding; di
   );
 }
 
-function FindingCard({ finding, running, onDecide }: { finding: Finding; running: boolean; onDecide: (kind: DecisionKind, rationale: string) => void }) {
-  const [open, setOpen] = useState(finding.state === "open" || finding.state === "contested");
+function FindingCard({ finding, running, onDecide, reveal }: { finding: Finding; running: boolean; onDecide: (kind: DecisionKind, rationale: string) => void; reveal?: boolean }) {
+  const [open, setOpen] = useState(reveal || finding.state === "open" || finding.state === "contested");
   const decidable = ["open", "fix_requested", "contested"].includes(finding.state);
   const resolved = ["fixed", "accepted_tradeoff", "dismissed", "superseded"].includes(finding.state);
   return (
@@ -628,7 +630,7 @@ function FindingCard({ finding, running, onDecide }: { finding: Finding; running
   );
 }
 
-function ProposalCard({ proposal, path, running, onApply, onReject, onReviewDiff, onRevise }: { proposal: Proposal; path: string; running: boolean; onApply: () => void; onReject: () => void; onReviewDiff?: () => void; onRevise?: (feedback: string) => void }) {
+function ProposalCard({ proposal, path, running, onApply, onReject, onReviewDiff, onRevise, revealDiff }: { proposal: Proposal; path: string; running: boolean; onApply: () => void; onReject: () => void; onReviewDiff?: () => void; onRevise?: (feedback: string) => void; revealDiff?: boolean }) {
   const [confirming, setConfirming] = useState(false);
   const [feedback, setFeedback] = useState("");
   const pending = proposal.state === "proposed";
@@ -660,7 +662,7 @@ function ProposalCard({ proposal, path, running, onApply, onReject, onReviewDiff
           Previous version kept at <span className="font-mono">{proposal.backupPath}</span>
         </p>
       )}
-      {(pending || proposal.state === "stale") && proposal.diff && <Diff patch={proposal.diff} path={path} />}
+      {(pending || proposal.state === "stale" || revealDiff) && proposal.diff && <Diff patch={proposal.diff} path={path} />}
       {pending && running && <p className="text-xs text-muted-foreground">Wait for this review to finish before applying or rejecting this change.</p>}
       {pending &&
         (confirming ? (
@@ -694,13 +696,24 @@ function ProposalCard({ proposal, path, running, onApply, onReject, onReviewDiff
   );
 }
 
-function SpecDetail({ specId, threadId, onBack, onDraft }: { specId: string; threadId: string | null; onBack: () => void; onDraft?: DraftRequest }) {
+function TargetItem({ active, children }: { active: boolean; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (active) {
+      ref.current?.scrollIntoView({ block: "start" });
+      ref.current?.focus({ preventScroll: true });
+    }
+  }, [active]);
+  return <div ref={ref} tabIndex={active ? -1 : undefined} className={active ? "scroll-mt-4 rounded-md ring-2 ring-ring p-2" : undefined}>{children}</div>;
+}
+
+function SpecDetail({ specId, threadId, onBack, onDraft, target }: { specId: string; threadId: string | null; onBack: () => void; onDraft?: DraftRequest; target?: EgmTarget }) {
   const rpc = useRpc<RpcContract>();
   const reviewer = useReviewer();
   const [detail, setDetail] = useState<Detail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [showDoc, setShowDoc] = useState(false);
+  const [showDoc, setShowDoc] = useState(Boolean(target && !target.findingId && !target.proposalId));
   const [showResolved, setShowResolved] = useState(false);
   const [selectedFindings, setSelectedFindings] = useState<string[]>([]);
   const load = useCallback(() => {
@@ -730,13 +743,16 @@ function SpecDetail({ specId, threadId, onBack, onDraft }: { specId: string; thr
 
   const visibleFindings = useMemo(() => {
     if (!detail) return [];
-    return detail.findings.filter((f) => (showResolved ? true : ["open", "fix_requested", "contested", "proposal_pending"].includes(f.state)));
-  }, [detail, showResolved]);
+    return detail.findings.filter((f) => (showResolved || f.id === target?.findingId || ["open", "fix_requested", "contested", "proposal_pending"].includes(f.state)));
+  }, [detail, showResolved, target?.findingId]);
   if (error) return <ErrorLine error={error} />;
   if (!detail) return <p className="text-sm text-muted-foreground">Loading…</p>;
   const { spec } = detail;
+  if (target && spec.projectId !== target.projectId) return <ErrorLine error="This document does not belong to the linked project." />;
+  const targetMissing = target?.findingId ? !detail.findings.some((f) => f.id === target.findingId)
+    : target?.proposalId ? !detail.proposals.some((p) => p.id === target.proposalId) : false;
   const pendingProposals = detail.proposals.filter((p) => p.state === "proposed");
-  const otherProposals = detail.proposals.filter((p) => p.state !== "proposed").slice(0, 5);
+  const otherProposals = detail.proposals.filter((p) => p.state !== "proposed").filter((p, index) => index < 5 || p.id === target?.proposalId);
   const runningRuns = new Set(detail.runs.filter((run) => run.state === "running").map((run) => run.id));
   const counts = {
     fixed: detail.findings.filter((f) => f.state === "fixed").length,
@@ -766,21 +782,21 @@ function SpecDetail({ specId, threadId, onBack, onDraft }: { specId: string; thr
         <ReviewerBanner status={reviewer} />
       </div>
       <ErrorLine error={actionError} />
+      {targetMissing && <ErrorLine error="The linked item is no longer available. You are viewing its document." />}
       {onDraft && spec.exists && <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => onDraft("Use the Elephant drafting workflow to draft a spec from this concept document.", specContext)}>Draft from concept</Button><Button size="sm" variant="outline" onClick={() => onDraft("Propose a change to this document for human review; do not directly edit it.", specContext)}>Ask for change proposal</Button></div>}
       {!threadId && <p className="text-xs text-muted-foreground">To draft an Elephant request, open this spec in the relevant thread's Elephant Goldfish tab.</p>}
 
       {pendingProposals.length > 0 && (
         <Section title="Waiting for your confirmation">
           {pendingProposals.map((p) => (
-            <ProposalCard
-              key={p.id}
+            <TargetItem key={p.id} active={p.id === target?.proposalId}><ProposalCard
               proposal={p}
               running={p.runId !== null && runningRuns.has(p.runId)}
               path={spec.path}
               onApply={() => act(rpc.call("proposal_apply", { proposalId: p.id, baseHash: p.baseHash, opId: opId() }))}
               onReject={() => act(rpc.call("proposal_reject", { proposalId: p.id, reason: "" }))}
               onReviewDiff={onDraft && p.diff && proposalInThread(p) ? () => onDraft("Review the proposed diff and explain its implications; do not apply it.", proposalContext(p)) : undefined}
-            />
+            /></TargetItem>
           ))}
         </Section>
       )}
@@ -812,15 +828,16 @@ function SpecDetail({ specId, threadId, onBack, onDraft }: { specId: string; thr
         ) : (
           <div className="space-y-2">
             {visibleFindings.map((f) => (
-              <div key={f.id} className="space-y-1">
+              <TargetItem key={f.id} active={f.id === target?.findingId}><div className="space-y-1">
               {onDraft && eligibleFindings.some((finding) => finding.id === f.id) && <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={chosenFindings.some((finding) => finding.id === f.id)} disabled={(selectedRunId !== undefined && selectedRunId !== f.runId) || (chosenFindings.length >= 100 && !chosenFindings.some((finding) => finding.id === f.id))} onChange={(event) => setSelectedFindings(event.target.checked ? [...chosenFindings.map((finding) => finding.id), f.id] : chosenFindings.filter((finding) => finding.id !== f.id).map((finding) => finding.id))} />Select finding {f.id}</label>}
               <FindingCard
                 key={f.id}
                 finding={f}
+                reveal={f.id === target?.findingId}
                 running={runningRuns.has(f.runId)}
                 onDecide={(kind, rationale) => act(rpc.call("finding_decide", { findingId: f.id, kind, rationale, opId: opId() }))}
               />
-              </div>
+              </div></TargetItem>
             ))}
           </div>
         )}
@@ -836,12 +853,12 @@ function SpecDetail({ specId, threadId, onBack, onDraft }: { specId: string; thr
       {otherProposals.length > 0 && (
         <Section title="Earlier proposals">
           {otherProposals.map((p) => (
-            <ProposalCard key={p.id} proposal={p} path={spec.path} running={p.runId !== null && runningRuns.has(p.runId)} onApply={() => {}} onReject={() => {}} onReviewDiff={onDraft && p.diff && proposalInThread(p) ? () => onDraft("Review the proposed diff and explain its implications; do not apply it.", proposalContext(p)) : undefined} onRevise={onDraft && p.state === "rejected" && proposalInThread(p) ? (feedback) => onDraft("Revise the rejected proposal using the feedback and propose the revision for human review; do not directly edit the document.", { ...proposalContext(p), feedback }) : undefined} />
+            <TargetItem key={p.id} active={p.id === target?.proposalId}><ProposalCard revealDiff={p.id === target?.proposalId} proposal={p} path={spec.path} running={p.runId !== null && runningRuns.has(p.runId)} onApply={() => {}} onReject={() => {}} onReviewDiff={onDraft && p.diff && proposalInThread(p) ? () => onDraft("Review the proposed diff and explain its implications; do not apply it.", proposalContext(p)) : undefined} onRevise={onDraft && p.state === "rejected" && proposalInThread(p) ? (feedback) => onDraft("Revise the rejected proposal using the feedback and propose the revision for human review; do not directly edit the document.", { ...proposalContext(p), feedback }) : undefined} /></TargetItem>
           ))}
         </Section>
       )}
 
-      <Section
+      <TargetItem active={Boolean(target && !target.findingId && !target.proposalId)}><Section
         title="Document"
         actions={
           <Button size="sm" variant="ghost" onClick={() => setShowDoc((v) => !v)}>
@@ -850,7 +867,7 @@ function SpecDetail({ specId, threadId, onBack, onDraft }: { specId: string; thr
         }
       >
         {showDoc && (detail.content === null ? <p className="text-sm text-muted-foreground">The file is missing.</p> : <Markdown content={detail.content} />)}
-      </Section>
+      </Section></TargetItem>
 
       <Section title="History">
         <ul className="space-y-1 text-xs text-muted-foreground">
@@ -867,17 +884,27 @@ function SpecDetail({ specId, threadId, onBack, onDraft }: { specId: string; thr
 
 // --- surfaces ----------------------------------------------------------------
 
-function Workspace({ projectId, threadId, onDraft }: { projectId: string; threadId: string | null; onDraft?: DraftRequest }) {
-  const [specId, setSpecId] = useState<string | null>(null);
-  useEffect(() => setSpecId(null), [projectId]);
+function Workspace({ projectId, threadId, onDraft, target }: { projectId: string; threadId: string | null; onDraft?: DraftRequest; target?: EgmTarget }) {
+  const [specId, setSpecId] = useState<string | null>(target?.specId ?? null);
+  useEffect(() => setSpecId(target?.specId ?? null), [projectId, target?.specId, target?.findingId, target?.proposalId]);
+  if (target && target.projectId !== projectId) return <ErrorLine error="This link belongs to another project. Open it from the matching project thread or use the full-page link." />;
   return specId ? (
-    <SpecDetail key={specId} specId={specId} threadId={threadId} onBack={() => setSpecId(null)} onDraft={onDraft} />
+    <SpecDetail key={`${specId}:${target?.findingId ?? target?.proposalId ?? ""}`} specId={specId} threadId={threadId} onBack={() => setSpecId(null)} onDraft={onDraft} target={specId === target?.specId ? target : undefined} />
   ) : (
     <SpecList projectId={projectId} onOpen={setSpecId} />
   );
 }
 
-function ProjectPage() {
+function ProjectPage({ subPath }: { subPath: string }) {
+  const navigate = useBbNavigate();
+  if (!subPath) return <ProjectOverview />;
+  const target = parseTargetPath(subPath);
+  return <div className="h-full overflow-y-auto p-4 md:p-6"><div className="mx-auto max-w-4xl">
+    {target ? <SpecDetail key={subPath} specId={target.specId} target={target} threadId={null} onBack={() => navigate.toPluginPanel("specs")} /> : <ErrorLine error="This Elephant Goldfish link is invalid." />}
+  </div></div>;
+}
+
+function ProjectOverview() {
   const rpc = useRpc<RpcContract>();
   const reviewer = useReviewer();
   const { projectId: contextProjectId } = useBbContext();
@@ -931,7 +958,7 @@ function ProjectPage() {
   );
 }
 
-function ThreadTab({ threadId }: { threadId: string }) {
+function ThreadTab({ threadId, target }: { threadId: string; target?: EgmTarget }) {
   const rpc = useRpc<RpcContract>();
   const navigate = useBbNavigate();
   const composer = useComposer();
@@ -993,7 +1020,7 @@ function ThreadTab({ threadId }: { threadId: string }) {
             {active.length > 0 ? `${active.length} review(s) in progress or waiting for you` : "No review in progress"}
           </p>
         </div>
-        <Button size="sm" variant="ghost" onClick={() => navigate.toPluginPanel("specs")}>
+        <Button size="sm" variant="ghost" onClick={() => navigate.toPluginPanel("specs", target ? { subPath: targetPath(target) } : undefined)}>
           Open full page
         </Button>
       </div>
@@ -1001,13 +1028,40 @@ function ThreadTab({ threadId }: { threadId: string }) {
       <ErrorLine error={draftError} />
       {draftMessage && <p role="status" className="text-xs text-muted-foreground">{draftMessage}</p>}
       {pending && pending.threadId === threadId && <div className="space-y-2 rounded-md bg-muted/50 p-3"><p className="text-sm">The composer already has a draft. Append this request to its latest contents, or cancel without changing it?</p><div className="flex gap-2"><Button size="sm" onClick={() => void commitDraft(pending.threadId, pending.prompt, true, pending.contextual)}>Append</Button><Button size="sm" variant="ghost" onClick={() => { draftOperation.current?.abort(); setPending(null); setDraftError(null); }}>Cancel</Button></div></div>}
-      <GuidedRequest key={threadId} threadId={threadId} onDraft={draft} />
-      {projectId && <Workspace key={`workspace:${threadId}`} projectId={projectId} threadId={threadId} onDraft={draftContextual} />}
+      {!target && <GuidedRequest key={threadId} threadId={threadId} onDraft={draft} />}
+      {projectId && <Workspace key={`workspace:${threadId}`} projectId={projectId} threadId={threadId} onDraft={draftContextual} target={target} />}
     </div>
   );
 }
 
 export default definePluginApp((app) => {
+  app.slots.messageDirective({
+    id: "egm-open",
+    component: ({ attributes, source, message }) => {
+      const navigate = useBbNavigate();
+      const { threadId } = useBbContext();
+      const pluginId = experimental_usePluginId();
+      const parsed = targetSchema.safeParse(attributes);
+      if (!parsed.success || parsed.data.projectId !== message.projectId) return <span>{source}</span>;
+      const target = parsed.data;
+      return <a className="font-medium underline underline-offset-4" href={egmLink(pluginId, target).url} onClick={(event) => {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        if (threadId === message.threadId && navigate.openThreadPanel({ actionId: "egm-detail", params: target })) event.preventDefault();
+      }}>{target.proposalId ? "Review proposed change →" : target.findingId ? "View finding →" : "Open document →"}</a>;
+    },
+  });
+  app.slots.experimental_tab({
+    id: "egm-detail",
+    title: "Elephant Goldfish · linked item",
+    icon: "elephant-goldfish",
+    context: { kind: "thread" },
+    availability: "action",
+    layout: "flush",
+    component: ({ threadId, params }) => {
+      const target = useMemo(() => targetSchema.safeParse(params), [params]);
+      return target.success ? <ThreadTab threadId={threadId} target={target.data} /> : <ErrorLine error="Open a document, finding or proposal link from an Elephant Goldfish response." />;
+    },
+  });
   app.experimental_icons.register({ name: "elephant-goldfish", component: HostMark });
   app.slots.navPanel({
     id: "specs",

@@ -25,6 +25,7 @@ import { BbReviewer } from "./server/bb-reviewer.ts";
 import { GoldfishClient, normalizeBaseUrl } from "./server/goldfish.ts";
 import { MIGRATIONS, Store } from "./server/store.ts";
 import { resolveInside, WorkspaceError } from "./server/workspace.ts";
+import { egmLink, type EgmTarget } from "./lib/egm-links.ts";
 
 export { rpcContract };
 export type * from "./server/contract.ts";
@@ -261,6 +262,9 @@ export default async function plugin(bb: BbPluginApi) {
     content: [{ type: "text" as const, text: cause instanceof Error ? cause.message : String(cause) }],
     isError: true,
   });
+  const link = (target: EgmTarget) => egmLink(bb.pluginId, target);
+  const linkedSpec = (spec: Spec) => ({ ...spec, link: link({ projectId: spec.projectId, specId: spec.id }) });
+  const linkInstruction = "Render the returned link.directive exactly once on its own line, outside code fences, so the human can open the exact item in the panel. Opening never confirms a change.";
 
   bb.agents.registerTool({
     name: "egm_specs",
@@ -269,7 +273,7 @@ export default async function plugin(bb: BbPluginApi) {
     parameters: z.object({}),
     async execute(_params, { projectId }) {
       try {
-        return asText({ root: await projectRoot(projectId), specs: await describeAll(projectId) });
+        return asText({ root: await projectRoot(projectId), specs: (await describeAll(projectId)).map(linkedSpec), next: linkInstruction });
       } catch (cause) {
         return toolError(cause);
       }
@@ -283,7 +287,7 @@ export default async function plugin(bb: BbPluginApi) {
     parameters: z.object({ path: z.string().min(1).max(1024) }),
     async execute({ path }, { projectId }) {
       try {
-        return asText((await engine.describeSpec(await engine.registerSpec(projectId, path))).spec);
+        return asText({ ...linkedSpec((await engine.describeSpec(await engine.registerSpec(projectId, path))).spec), next: linkInstruction });
       } catch (cause) {
         return toolError(cause);
       }
@@ -320,7 +324,7 @@ export default async function plugin(bb: BbPluginApi) {
           threadId,
           reviewer: snapshot,
         });
-        return asText(run);
+        return asText({ ...run, link: link({ projectId, specId: params.specId }), next: linkInstruction });
       } catch (cause) {
         return toolError(cause);
       }
@@ -339,11 +343,12 @@ export default async function plugin(bb: BbPluginApi) {
         const { spec } = await engine.describeSpec(record);
         const latest = store.latestRun(specId);
         return asText({
-          spec,
+          spec: linkedSpec(spec),
           runs: (await runsWithStale(specId)).slice(0, 5),
           stages: latest ? store.listStages(latest.id) : [],
-          findings: store.listFindings(specId).filter((f) => f.state !== "superseded").slice(0, 100),
-          proposals: store.listProposals(specId).slice(0, 10).map(({ diff: _diff, ...rest }) => rest),
+          findings: store.listFindings(specId).filter((f) => f.state !== "superseded").slice(0, 100).map((finding) => ({ ...finding, link: link({ projectId, specId, findingId: finding.id }) })),
+          proposals: store.listProposals(specId).slice(0, 10).map(({ diff: _diff, ...rest }) => ({ ...rest, link: link({ projectId, specId, proposalId: rest.id }) })),
+          next: linkInstruction,
         });
       } catch (cause) {
         return toolError(cause);
@@ -362,7 +367,7 @@ export default async function plugin(bb: BbPluginApi) {
         const finding = store.getFinding(findingId);
         if (!finding) throw new EngineError("Unknown finding.");
         requireProjectSpec(finding.specId, projectId);
-        return asText(await engine.contest(findingId, rationale));
+        return asText({ ...await engine.contest(findingId, rationale), link: link({ projectId, specId: finding.specId, findingId }), next: linkInstruction });
       } catch (cause) {
         return toolError(cause);
       }
@@ -385,7 +390,7 @@ export default async function plugin(bb: BbPluginApi) {
         requireProjectSpec(specId, projectId);
         const proposal = await engine.propose(specId, findingIds, content, summary, threadId);
         const { diff, ...rest } = proposal;
-        return asText({ ...rest, diffLines: diff.split("\n").length, next: "Tell the human to review and confirm the diff in the Elephant Goldfish tab." });
+        return asText({ ...rest, diffLines: diff.split("\n").length, link: link({ projectId, specId, proposalId: proposal.id }), next: `${linkInstruction} Ask the human to inspect and explicitly confirm the diff there.` });
       } catch (cause) {
         return toolError(cause);
       }

@@ -973,7 +973,7 @@ function ThreadTab({ threadId }: { threadId: string }) {
   useEffect(load, [load]);
   useRealtime(CHANGED, load);
   return (
-    <div className="space-y-5 p-4" style={{ "--egm-color-elephant": "#6d63a8", "--egm-color-elephant-ink": "#514889", "--egm-color-elephant-surface": "#6d63a81a", "--egm-color-goldfish": "#c96d2d" } as CSSProperties}>
+    <div className="h-full min-h-0 space-y-5 overflow-y-auto p-4" style={{ "--egm-color-elephant": "#6d63a8", "--egm-color-elephant-ink": "#514889", "--egm-color-elephant-surface": "#6d63a81a", "--egm-color-goldfish": "#c96d2d" } as CSSProperties}>
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           <Mark label="Elephant Goldfish" className="size-5" />

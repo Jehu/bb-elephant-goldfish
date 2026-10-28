@@ -793,7 +793,7 @@ function SpecDetail({ specId, threadId, onBack, onDraft, target }: { specId: str
               proposal={p}
               running={p.runId !== null && runningRuns.has(p.runId)}
               path={spec.path}
-              onApply={() => act(rpc.call("proposal_apply", { proposalId: p.id, baseHash: p.baseHash, opId: opId() }))}
+              onApply={() => act(rpc.call("proposal_apply", { proposalId: p.id, baseHash: p.baseHash, opId: opId() }).then((result) => { if (onDraft && proposalInThread(p)) onDraft("The human just applied this proposed change to the document. Acknowledge that, then check the review status and continue the work from the applied state; do not edit the document directly.", { ...proposalContext(p), state: "applied" }); return result; }))}
               onReject={() => act(rpc.call("proposal_reject", { proposalId: p.id, reason: "" }))}
               onReviewDiff={onDraft && p.diff && proposalInThread(p) ? () => onDraft("Review the proposed diff and explain its implications; do not apply it.", proposalContext(p)) : undefined}
             /></TargetItem>

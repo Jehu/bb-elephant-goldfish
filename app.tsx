@@ -97,6 +97,17 @@ const SEVERITY_TONE: Record<string, string> = {
   nit: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
   unknown: "bg-muted text-muted-foreground",
 };
+
+const FINDING_TONE: Record<FindingState, string> = {
+  open: "bg-blue-500/15 text-blue-700 dark:text-blue-300",
+  fix_requested: "bg-amber-500/15 text-amber-800 dark:text-amber-300",
+  contested: "bg-violet-500/15 text-violet-700 dark:text-violet-300",
+  proposal_pending: "bg-amber-500/15 text-amber-800 dark:text-amber-300",
+  fixed: "bg-emerald-500/15 text-emerald-800 dark:text-emerald-300",
+  accepted_tradeoff: "bg-sky-500/15 text-sky-800 dark:text-sky-300",
+  dismissed: "bg-muted text-muted-foreground",
+  superseded: "bg-muted text-muted-foreground",
+};
 const LENS_LABEL: Record<LensId, string> = {
   zoom_out: "Zoom out",
   comprehension: "Comprehension",
@@ -577,20 +588,21 @@ function DecisionButtons({ finding, disabled, onDecide }: { finding: Finding; di
 function FindingCard({ finding, running, onDecide }: { finding: Finding; running: boolean; onDecide: (kind: DecisionKind, rationale: string) => void }) {
   const [open, setOpen] = useState(finding.state === "open" || finding.state === "contested");
   const decidable = ["open", "fix_requested", "contested"].includes(finding.state);
+  const resolved = ["fixed", "accepted_tradeoff", "dismissed", "superseded"].includes(finding.state);
   return (
-    <div className="space-y-2 border-b pb-3 last:border-b-0">
-      <button type="button" className="flex w-full items-start gap-2 text-left" onClick={() => setOpen((v) => !v)}>
+    <article className={cn("space-y-3 rounded-lg border p-3 transition-colors", resolved ? "border-border/70 bg-muted/25" : "border-border bg-card shadow-sm")}>
+      <button type="button" className="flex w-full items-start gap-2 text-left" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
         <Badge className={SEVERITY_TONE[finding.severity]}>{finding.rawSeverity === "(none)" ? finding.severity : finding.rawSeverity}</Badge>
-        <span className="flex-1 text-sm font-medium">{finding.title}</span>
-        <Badge className="bg-muted text-muted-foreground">{FINDING_LABEL[finding.state]}</Badge>
+        <span className="min-w-0 flex-1 text-sm font-semibold leading-5">{finding.title}</span>
+        <span className="shrink-0 text-xs text-muted-foreground">{open ? "Hide" : "Details"}</span>
       </button>
-      <div className="text-xs text-muted-foreground">
-        {LENS_LABEL[finding.lens]} · round {finding.round}
-        {finding.lineStart !== null ? ` · lines ${finding.lineStart}–${finding.lineEnd} of the reviewed version` : ""}
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <Badge className={FINDING_TONE[finding.state]}>{FINDING_LABEL[finding.state]}</Badge>
+        <span>{LENS_LABEL[finding.lens]} · round {finding.round}{finding.lineStart !== null ? ` · lines ${finding.lineStart}–${finding.lineEnd} of the reviewed version` : ""}</span>
       </div>
       {open && (
         <>
-          <div className="text-sm">
+          <div className="border-t pt-3 text-sm leading-6">
             <Markdown content={finding.body || "_No explanation given._"} />
           </div>
           {finding.elephantNote && (
@@ -612,7 +624,7 @@ function FindingCard({ finding, running, onDecide }: { finding: Finding; running
           )}
         </>
       )}
-    </div>
+    </article>
   );
 }
 

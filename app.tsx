@@ -1045,6 +1045,7 @@ export default definePluginApp((app) => {
     icon: "elephant-goldfish",
     context: { kind: "thread" },
     availability: "action",
+    useVisible: () => false,
     layout: "flush",
     component: ({ threadId, params }) => {
       const target = useMemo(() => targetSchema.safeParse(params), [params]);

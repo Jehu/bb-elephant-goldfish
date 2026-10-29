@@ -289,14 +289,14 @@ function GuidedRequest({ threadId, onDraft }: { threadId: string; onDraft: Draft
 
 // --- spec list -------------------------------------------------------------
 
-function SpecRow({ spec, onOpen }: { spec: Spec; onOpen: () => void }) {
+function SpecRow({ spec, onOpen, onForget }: { spec: Spec; onOpen: () => void; onForget: () => void }) {
   const run = spec.latestRun;
   return (
-    <li>
+    <li className="flex items-center gap-1">
       <button
         type="button"
         onClick={onOpen}
-        className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-state-hover"
+        className="flex min-w-0 flex-1 items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-state-hover"
       >
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-medium">{spec.title}</div>
@@ -315,6 +315,7 @@ function SpecRow({ spec, onOpen }: { spec: Spec; onOpen: () => void }) {
           <Badge className="bg-amber-500/15 text-amber-700 dark:text-amber-400">{spec.pendingDecisions} to decide</Badge>
         )}
       </button>
+      <Button size="sm" variant="ghost" className="text-muted-foreground" aria-label={`Remove review for ${spec.path}`} onClick={onForget}>Forget</Button>
     </li>
   );
 }
@@ -355,6 +356,9 @@ function SpecList({ projectId, onOpen }: { projectId: string; onOpen: (specId: s
   const [specs, setSpecs] = useState<Spec[] | null>(null);
   const [root, setRoot] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [forgetting, setForgetting] = useState<Spec | null>(null);
+  const [forgetError, setForgetError] = useState<string | null>(null);
+  const [forgetBusy, setForgetBusy] = useState(false);
   const load = useCallback(() => {
     rpc.call("specs_list", { projectId }).then(
       (result) => {
@@ -369,6 +373,20 @@ function SpecList({ projectId, onOpen }: { projectId: string; onOpen: (specId: s
   useRealtime(CHANGED, (payload) => {
     if (payload && typeof payload === "object" && "projectId" in payload && payload.projectId === projectId) load();
   });
+  const confirmForget = async () => {
+    if (!forgetting) return;
+    setForgetBusy(true);
+    setForgetError(null);
+    try {
+      const { removed } = await rpc.call("specs_forget", { specId: forgetting.id });
+      if (!removed) throw new Error("This review was already removed.");
+      setForgetting(null);
+    } catch (cause) {
+      setForgetError(errorText(cause));
+    } finally {
+      setForgetBusy(false);
+    }
+  };
   return (
     <div className="space-y-3">
       <ErrorLine error={error} />
@@ -388,11 +406,26 @@ function SpecList({ projectId, onOpen }: { projectId: string; onOpen: (specId: s
       ) : (
         <ul className="divide-y divide-border rounded-md border">
           {specs.map((spec) => (
-            <SpecRow key={spec.id} spec={spec} onOpen={() => onOpen(spec.id)} />
+            <SpecRow key={spec.id} spec={spec} onOpen={() => onOpen(spec.id)} onForget={() => { setForgetError(null); setForgetting(spec); }} />
           ))}
         </ul>
       )}
       {root !== null && <RegisterSpec projectId={projectId} onDone={(spec) => onOpen(spec.id)} />}
+      <Dialog open={forgetting !== null} onOpenChange={(open) => { if (!open && !forgetBusy) setForgetting(null); }}>
+        <DialogContent hideCloseButton={forgetBusy}>
+          <DialogHeader>
+            <DialogTitle>Remove this review?</DialogTitle>
+            <DialogDescription>
+              This deletes the review runs, findings, decisions and proposals tracked for <span className="font-mono">{forgetting?.path}</span>. The file itself is not changed. Adding it again starts fresh.
+            </DialogDescription>
+          </DialogHeader>
+          <ErrorLine error={forgetError} />
+          <DialogFooter>
+            <Button variant="outline" disabled={forgetBusy} onClick={() => setForgetting(null)}>Cancel</Button>
+            <Button disabled={forgetBusy} onClick={confirmForget}>Remove review</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

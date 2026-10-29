@@ -45,9 +45,8 @@ coverage/
 .idea/shelf/
 .vscode/*.log
 
-# Noema runtime storage; keep cortex metadata and traces versioned
-/bb-elephant-goldfish/db/
-/bb-elephant-goldfish/.noema-storage.lock
+# Local Noema runtime storage; keep it fully out of the repository
+/bb-elephant-goldfish/
 
 # EGM apply staging and retained pre-images; review reports remain versionable
 .*.egm-pre-*

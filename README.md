@@ -137,6 +137,14 @@ rendered.
    limit the changed document is explicitly **not re-reviewed**. Cancellation,
    failure, partial output and stale versions are visible non-success states.
 
+### From spec to implementation
+
+The plugin covers the specification lifecycle only; it performs no commits or
+issue sync and does not track implementation progress. Pair it with an issue
+tracker for the build phase: see [docs/issue-tracking.md](docs/issue-tracking.md)
+for the scope split and a recommended handoff (turn a clean, reviewed spec into
+tracker issues).
+
 ### Seven skills
 
 | Skill | Purpose |

@@ -931,7 +931,7 @@ function Workspace({ projectId, threadId, onDraft, target }: { projectId: string
 
 function ProjectPage({ subPath }: { subPath: string }) {
   const navigate = useBbNavigate();
-  if (!subPath) return <ProjectOverview />;
+  if (!subPath) return <div className="h-full min-h-0 overflow-y-auto"><ProjectOverview /></div>;
   const target = parseTargetPath(subPath);
   return <div className="h-full overflow-y-auto p-4 md:p-6"><div className="mx-auto max-w-4xl">
     {target ? <SpecDetail key={subPath} specId={target.specId} target={target} threadId={null} onBack={() => navigate.toPluginPanel("specs")} /> : <ErrorLine error="This Elephant Goldfish link is invalid." />}

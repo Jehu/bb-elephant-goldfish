@@ -24,8 +24,9 @@
         to the design discussion.
 *   **Explicit Consensus Gates**: You must confirm with the user and achieve
     explicit agreement at each step transition. Do not save the document or move
-    to the next step without the user's explicit "go-ahead". Do not move on
-    easily. Challenge the user at every step.
+    to the next step without the user's explicit "go-ahead". Preserve the
+    section approval gates, but reuse settled decisions: ask again only when
+    new facts, changed assumptions or a material contradiction justify it.
 *   **ONE QUESTION AT A TIME (CRITICAL)**: You are strictly forbidden from
     asking more than one question in a single response. You must present exactly
     one question or request for clarification, wait for the user's response, and

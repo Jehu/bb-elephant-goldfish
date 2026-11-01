@@ -16,7 +16,7 @@ You hold the context the Goldfish lacked. Use it to judge each finding. Never ag
 
 ## Steps
 
-1. `egm_review_status` with the `specId`. If the request selects findings, work only on those IDs from one review run. Work on `open` or `fix_requested` findings, and include `contested` findings only when proposing a fix. Ignore `superseded` findings: they were about an older version.
+1. `egm_review_status` with the `specId`. Read its `reviewContext`: historical human decisions, their reviewed versions, budget omissions and context problems. Check applicability against the current document; history is neither a blanket exemption nor proof of current validity. If the request selects findings, work only on those IDs from one review run. Work on `open` or `fix_requested` findings, and include `contested` findings only when proposing a fix. Ignore `superseded` findings: they were about an older version.
 2. For each finding choose one:
    - **CONTEST**: an open or fix-requested finding is wrong or already covered. Call `egm_contest` with a specific rationale (cite the section or decision). The finding stays unresolved until the human decides.
    - **PROPOSE FIX**: include it in your proposal.
@@ -29,3 +29,4 @@ You hold the context the Goldfish lacked. Use it to judge each finding. Never ag
 - Read the `spec.checkout` returned by `egm_review_status` before reading the file. Work in that checkout, including its worktree; do not read or revise the same path in the main checkout instead. A thread in another checkout cannot propose changes for this spec. Report unavailable or unassigned checkouts and let the human select the matching environment or explicitly assign the original checkout; do not guess. Confirmed apply retains the registered target even if the author thread later moves.
 - Only the human decides: request fix, accept as a trade-off (with a reason), or dismiss. Accepted trade-offs are kept risks, not fixes; never describe them as fixed.
 - Severity labels are the reviewer's; do not relabel them.
+- Group findings with the same cause. Research technical facts in the bound checkout before asking the human to choose; where evidence is unavailable, name the lookup and what remains unverified. Present material scope or risk choices together with a recommendation and relevant simpler alternatives. Keep unresolved prerequisites and accepted scope reductions explicit in the document or rationale; approval does not establish their fulfillment or authorize operation.

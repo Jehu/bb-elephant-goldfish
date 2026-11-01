@@ -12,6 +12,8 @@ spec changes for the Elephant Goldfish BB plugin.
 - `engine.ts`: run/stage/finding/proposal lifecycle and restart reconciliation.
 - `goldfish.ts`: fresh, tool-less OpenAI-compatible review calls.
 - `prompts.ts`: pinned personas/standards, presets and finding parser.
+- `review-guidelines.md`: canonical shared BB review rules, injected through
+  `server.ts` agent configuration and every Goldfish stage; keep under 4096 characters.
 - `workspace.ts`: confined file reads and compare-and-replace apply protocol.
 - `checkouts.ts`: BB environment resolution, server-local host verification and
   validation of persisted checkout identities.
@@ -52,6 +54,15 @@ spec changes for the Elephant Goldfish BB plugin.
 - Distinguish fixed, accepted trade-off and dismissed findings. Rejecting a
   shared proposal releases its other findings without detaching findings claimed
   by a newer proposal. Starting a new review finishes superseded waiting runs.
+- Review inputs include historical, non-superseded human finding decisions from
+  the same spec, with rationale, current finding state and source run/reviewed
+  hash. Keep complete entries within a separate 32,000-character JSON-array
+  budget and report omissions; history never suppresses new findings or implies
+  current validity. Forward recorded missing/refused/over-budget context notes
+  by spec and run, independent of the general recent-event limit.
+- `egm_review_status.reviewContext` uses the same projection with the current
+  file hash and latest run's notes. It is not a complete register of chat or
+  external decisions; document confirmation grants no operational authority.
 - Automatically re-review only after a confirmed change and no unresolved
   decisions, including decisions made while stages run. Bind continuation to
   the applied result hash; a different current version makes the run stale.

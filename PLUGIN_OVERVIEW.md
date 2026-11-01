@@ -19,9 +19,10 @@ The model separates three roles:
 - **Elephant** — your normal BB conversation. It knows the project and the
   decisions behind the spec. It can contest a finding with a rationale or
   propose a revised document, but it never edits the spec directly.
-- **Goldfish** — the fresh-context reviewer. Each review stage is prompted
-  with only the reviewer persona, the document standard, the numbered spec
-  and the context files you selected, so it carries none of the
+- **Goldfish** — the fresh-context reviewer. Each review stage receives the
+  reviewer persona, document standard, shared review guidelines, numbered spec,
+  selected context files and bounded historical human decisions/context
+  limitations from that spec. It carries none of the
   conversation's history. In the Advanced endpoint mode those prompt inputs
   are all it ever gets; a BB worker reviewer receives the same prompt but
   also keeps BB's normal tool permissions and can read the workspace within
@@ -43,8 +44,8 @@ installation-wide consent, revocable at any time. BB worker threads are not a
 sandbox; revoking BB's own permissions is what changes what workers can do.
 
 **Advanced endpoint** is the optional tool-less mode: a fresh
-OpenAI-compatible model call that receives only the persona, standard, spec
-and chosen context files. It cannot read other files, run commands or change
+OpenAI-compatible model call that receives those review inputs. It cannot
+read other files, run commands or change
 anything, and tool-call responses are rejected. It needs a base URL ending in
 `/v1`, a model id and an API key stored in BB's plugin secret store. If the
 selected engine is unavailable, the launch is refused with its reason; the

@@ -18,7 +18,7 @@ Adapted from google/elephant-goldfish-model @ 3d0b348 (Apache-2.0; see `LICENSE`
 - **TargetFile**: Markdown path relative to the invoking thread's checkout, including a worktree. Register it with `egm_register_spec`; verify its returned `checkout`. The same path in another checkout is a separate spec. Existing IDs, review rounds and confirmed changes keep their registered checkout; never fall back to the main checkout after a thread moves or an environment becomes unavailable.
 - **Reviewers**: lens names from `zoom_out`, `comprehension`, `design_critic`, `implementation_readiness`, `structural`, `style`, `codebase_details`. Upstream recommendations: feature specs → `design_critic` + `structural` against `feature-spec-standard`; implementation plans → `implementation_readiness` + `codebase_details` against `implementation-readiness-standard`.
 - **Standard**: one of `feature-spec-standard`, `implementation-readiness-standard`, `zoom-out-standard`, `heilmeier-standard`, `re-implementation-standard`.
-- **Reviewer context**: project-relative files supplied to Advanced endpoint calls; BB workers follow BB permission mode.
+- **Reviewer context**: selected project-relative files, shared plugin guidelines and bounded historical human decisions/context limitations reach both engines. Advanced endpoint calls are tool-less; BB workers follow BB permission mode. Missing or budget-omitted inputs are unknown, not evidence of absent decisions or safeguards.
 - **Round limit**: default 3.
 
 ## Loop

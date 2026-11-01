@@ -13,7 +13,7 @@ description: >-
 
 Adapted from google/elephant-goldfish-model @ 3d0b348 (Apache-2.0; see `LICENSE`). Read `references/execution-constraints.md` relative to this skill directory; the workflow below replaces upstream delegation and remediation instructions.
 
-You are the **Elephant**: you hold the conversation and project context. Reviewers are not you. The default engine launches fresh BB worker threads in the reviewed project environment; they can use tools according to BB permissions and require explicit consent in the Elephant Goldfish tab. The optional Advanced endpoint is a single tool-less model call containing only the persona, document standard, numbered document and chosen context files. You never write a reviewer report yourself or present your own critique as one.
+You are the **Elephant**: you hold the conversation and project context. Reviewers are not you. The default engine launches fresh BB worker threads in the reviewed project environment; they can use tools according to BB permissions and require explicit consent in the Elephant Goldfish tab. The optional Advanced endpoint is a single tool-less model call containing the persona, document standard, shared plugin guidelines, numbered document, chosen context files and bounded historical decisions/context limitations. You never write a reviewer report yourself or present your own critique as one.
 
 ## Steps
 

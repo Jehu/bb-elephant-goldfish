@@ -80,7 +80,7 @@ When the user requests a durable behavior change, record it here or in the relev
 
 - Review limit badges name the specific cause (rounds, output, rate limit or timeout) in both the overview and review details; retain the detailed reason.
 - Worktree support is required: bind specs, reviews and proposals to their checkout and apply confirmed changes there. Rejecting all worktrees is insufficient; never silently redirect their operations to the main checkout.
-- EGM improvements must remain agent-agnostic and must not depend on personal or external skills installed by the user. The overengineering discussion is recorded in [`docs/overengineering-leitplanken.md`](docs/overengineering-leitplanken.md); its proposed mechanisms are not yet an implementation plan.
+- EGM improvements must remain agent-agnostic and must not depend on personal or external skills installed by the user. Shared review rules live in [`server/review-guidelines.md`](server/review-guidelines.md) and reach Elephant and Goldfish directly. The original discussion and bounded research remain in [`docs/overengineering-leitplanken.md`](docs/overengineering-leitplanken.md) and [`research/egm-overengineering/RESULTS.md`](research/egm-overengineering/RESULTS.md).
 
 ## Project Guidance
 

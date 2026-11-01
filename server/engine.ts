@@ -27,7 +27,7 @@ import {
 import { unifiedDiff } from "./diff.ts";
 import { ENDPOINT_CHANGED, normalizeBaseUrl } from "./goldfish.ts";
 import type { GoldfishClient, GoldfishMessage, GoldfishResult } from "./goldfish.ts";
-import { parseFindings, presetStages, stageMessages, type ContextFile } from "./prompts.ts";
+import { parseFindings, presetStages, stageMessages, type ContextFile, type ReviewContext } from "./prompts.ts";
 import { checkoutKey, newId, type SpecRecord, type Store } from "./store.ts";
 import {
   compareAndReplace,
@@ -77,6 +77,7 @@ export type StartOptions = {
 };
 
 const MAX_CONTEXT_BYTES = 400_000;
+const DECISION_CONTEXT_CHARS = 32_000;
 const REPORT_ROOT = ".egm/reviews";
 
 const titleOf = (content: string, fallback: string): string =>
@@ -121,6 +122,39 @@ export class Engine {
 
   private event(spec: SpecRecord, runId: string | null, kind: string, message: string): void {
     this.deps.store.addEvent(spec.id, runId, kind, message);
+  }
+
+  /** Historical evidence only: no decision is automatically declared applicable. */
+  reviewContext(specId: string, run: Run | null, currentHash: string | null): ReviewContext {
+    if (run && run.specId !== specId) throw new EngineError("Review context belongs to another spec.");
+    const result: ReviewContext = {
+      runId: run?.id ?? null, currentHash, decisions: [],
+      decisionBudget: DECISION_CONTEXT_CHARS, omittedDecisions: 0, omissionReason: null,
+      contextNotes: run ? this.deps.store.listContextNotes(specId, run.id) : [],
+    };
+    if (!run) return result;
+    const runs = new Map(this.deps.store.listRuns(specId).map((r) => [r.id, r]));
+    const findings = this.deps.store.listFindings(specId)
+      .filter((f) => f.decision !== null && f.state !== "superseded")
+      .sort((a, b) => b.decision!.decidedAt - a.decision!.decidedAt || a.id.localeCompare(b.id));
+    let used = 2; // JSON array brackets; include only complete entries.
+    for (const finding of findings) {
+      const decision = finding.decision!;
+      const entry = {
+        findingId: finding.id, title: finding.title, body: finding.body,
+        kind: decision.kind, state: finding.state, rationale: decision.rationale, decidedAt: decision.decidedAt,
+        sourceRunId: finding.runId, reviewedHash: runs.get(finding.runId)?.targetHash ?? null,
+      };
+      const size = JSON.stringify(entry).length + (result.decisions.length ? 1 : 0);
+      if (used + size > DECISION_CONTEXT_CHARS) {
+        result.omittedDecisions++;
+        continue;
+      }
+      result.decisions.push(entry);
+      used += size;
+    }
+    if (result.omittedDecisions) result.omissionReason = "Decision character budget; omitted entries are unknown, not absent decisions.";
+    return result;
   }
 
   // --- specs -------------------------------------------------------------
@@ -493,6 +527,7 @@ export class Engine {
         specPath: spec.path,
         specContent: file.content,
         context: context.files,
+        reviewContext: this.reviewContext(spec.id, run, file.hash),
         earlierReports: parallel ? [] : stage.lens === "zoom_out" && stage.position > 0 ? [...reports] : [],
       });
       const result = await reviewer.complete(messages, signal, {

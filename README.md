@@ -20,8 +20,9 @@ with current UI screenshots under [screenshots/](screenshots/).
   tools and write according to BB's permission mode, so this mode requires
   explicit installation-wide consent before the first launch.
 - **Advanced endpoint**: a fresh, tool-less OpenAI-compatible model call. It
-  receives only the reviewer persona, document standard, numbered spec and the
-  context files you chose; it cannot read other files, run commands or change
+  receives the reviewer persona, document standard, shared guidelines, numbered
+  spec, chosen context files and bounded historical decisions/context limitations;
+  it cannot read other files, run commands or change
   anything. Tool-call responses are rejected.
 - **You**: decide findings, inspect proposed changes and explicitly confirm
   application. Automatic re-review follows a successfully applied change.
@@ -137,6 +138,32 @@ rendered.
    limit the changed document is explicitly **not re-reviewed**. Cancellation,
    failure, partial output and stale versions are visible non-success states.
 
+### Proportionate review guidelines
+
+The plugin supplies [shared guidelines](server/review-guidelines.md) directly
+to the Elephant through BB agent instructions and to every Goldfish stage in
+both engines. Personal skills are not required. These guidelines qualify the
+upstream Alternatives and Zero-Decision rules: focus on material scope,
+concrete failure paths and human choices, while leaving equivalent technical
+execution open. Small changes need no counterarchitecture or risk form.
+
+Reviews also receive historical human finding decisions from the same spec,
+including their rationale, current finding state, originating run and reviewed
+hash, alongside the current target hash. This is evidence to assess, not an
+automatic exemption from new findings or proof that a decision still applies.
+Complete decision entries are included newest first within a separate 32,000
+serialized-character budget; omitted entries are counted and marked unknown.
+Reasons for missing, refused or over-budget context files remain visible to
+reviewers. `egm_review_status.reviewContext` exposes the same decision projection
+and the latest run's recorded context limitations to the Elephant. It covers
+stored finding decisions, not every choice made in chat or outside the plugin.
+
+The shared instruction block stays below BB's 4,096-character limit. New
+instructions take effect when a provider session is next constructed; reloading
+the plugin does not rewrite an already-running session. These are review
+guidelines, not a guarantee of model judgments or measured effort reduction.
+Document confirmation does not fulfill open prerequisites or authorize operation.
+
 ### From spec to implementation
 
 The plugin covers the specification lifecycle only; it performs no commits or
@@ -163,7 +190,7 @@ AST scan. The review engine always reviews the whole document; upstream's
 semantic-section scope is not exposed by this adaptation. Reviewer context is
 an explicit reading list: linked files and URLs are not fetched automatically.
 
-- Context is capped at 20 files and 400,000 characters. Omitted/missing context
+- Selected file context is capped at 20 files and 400,000 characters. Omitted/missing context
   is recorded in the history. Advanced endpoint reviewers have no tools to fill
   the gaps; BB workers retain only BB's normal tool permissions.
 - Apply checks the proposal's base version, retains a backup, atomically replaces

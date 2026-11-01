@@ -9,6 +9,7 @@ import { Engine, type ReviewEngine, type ReviewerCall, type ReviewerSnapshot } f
 import { GoldfishClient } from "./goldfish.ts";
 import { MIGRATIONS, Store } from "./store.ts";
 import { sha256 } from "./workspace.ts";
+import { reviewGuidelines, type ReviewContext } from "./prompts.ts";
 
 /**
  * `gate`: the reply waits until the test opens it (and still honors abort).
@@ -91,6 +92,82 @@ async function setup(replies: Reply[], options: { configured?: boolean; bb?: () 
   return { root, db, store, engine, spec, endpoint, review };
 }
 
+const sentContext = (content: string): ReviewContext =>
+  JSON.parse(content.split("\n").find((line) => line.startsWith('{"runId":'))!);
+
+test("human decisions reach automatic and fresh rounds without suppressing new findings", async (t) => {
+  const f = await setup([{ content: FINDING("Restore policy") + FINDING("Wording") + FINDING("Fix") },
+    { content: FINDING("Restore policy") }, { content: "NO FINDINGS" }]);
+  t.after(async () => { f.engine.dispose(); await f.engine.settle(); f.db.close(); await fs.rm(f.root, { recursive: true, force: true }); });
+  const first = await f.review("implementation");
+  const [risk, wording, fix] = f.store.listFindingsForRun(first.id);
+  await f.engine.decide(risk!.id, "accept_tradeoff", "Manual paused recovery is acceptable; no replay authorized.", "human", "risk-choice");
+  await f.engine.decide(wording!.id, "dismiss", "Already explicit in the contract.", "human", "wording-choice");
+  await f.engine.decide(fix!.id, "request_fix", "Clarify the wording.", "human", "fix-choice");
+  const proposal = await f.engine.propose(f.spec.id, [fix!.id], "# Spec\nChanged version; new facts remain reviewable.\n", "Clarify", "author");
+  await f.engine.applyProposal(proposal.id, proposal.baseHash, "apply");
+  await f.engine.settle();
+  const context = sentContext(f.endpoint.requests[1]!.messages[1]!.content);
+  const historical = context.decisions.find((d) => d.findingId === risk!.id)!;
+  assert.equal(historical.rationale, "Manual paused recovery is acceptable; no replay authorized.");
+  assert.equal(historical.kind, "accept_tradeoff");
+  assert.equal(historical.sourceRunId, first.id);
+  assert.equal(historical.reviewedHash, first.targetHash);
+  assert.notEqual(context.currentHash, historical.reviewedHash);
+  assert.equal(context.decisions.length, 3);
+  assert.equal(context.decisions.find((d) => d.findingId === fix!.id)!.state, "fixed", "a past fix request is not presented as unresolved");
+  const second = f.store.listRuns(f.spec.id).find((r) => r.id === context.runId)!;
+  assert.equal(f.store.listFindingsForRun(second.id)[0]!.title, "Restore policy", "new findings are not filtered by historical decisions");
+  const fresh = await f.review("implementation");
+  assert.equal(sentContext(f.endpoint.requests[2]!.messages[1]!.content).runId, fresh.id);
+  assert.equal(sentContext(f.endpoint.requests[2]!.messages[1]!.content).decisions.length, 3);
+});
+
+test("missing, refused and oversized context survives unrelated event history", async (t) => {
+  const f = await setup([{ content: "NO FINDINGS" }, { content: "NO FINDINGS" }]);
+  t.after(async () => { f.engine.dispose(); await f.engine.settle(); f.db.close(); await fs.rm(f.root, { recursive: true, force: true }); });
+  await fs.writeFile(path.join(f.root, "huge.md"), "x".repeat(400001));
+  await fs.mkdir(path.join(f.root, "not-file.md"));
+  const run = await f.review("implementation", { context: ["missing.md", "huge.md", "not-file.md"] });
+  const sent = sentContext(f.endpoint.requests[0]!.messages[1]!.content);
+  assert.equal(sent.contextNotes.length, 3);
+  assert.match(sent.contextNotes.join("\n"), /missing: missing\.md/);
+  assert.match(sent.contextNotes.join("\n"), /size budget: huge\.md/);
+  assert.match(sent.contextNotes.join("\n"), /refused: not-file\.md/);
+  for (let i = 0; i < 120; i++) f.store.addEvent(f.spec.id, run.id, "other", "noise");
+  assert.equal(f.store.listEvents(f.spec.id).some((e) => e.kind === "context"), false);
+  assert.deepEqual(f.engine.reviewContext(f.spec.id, run, run.targetHash), sent);
+  const fresh = await f.review("implementation");
+  assert.deepEqual(f.engine.reviewContext(f.spec.id, fresh, fresh.targetHash).contextNotes, []);
+  assert.deepEqual(f.engine.reviewContext(f.spec.id, null, fresh.targetHash).decisions, []);
+  assert.throws(() => f.engine.reviewContext("other-spec", run, run.targetHash), /another spec/);
+});
+
+test("decision budget preserves whole entries, skips oversized ones and excludes superseded choices", async (t) => {
+  const f = await setup([{ content: FINDING("Seed") }]);
+  t.after(async () => { f.engine.dispose(); await f.engine.settle(); f.db.close(); await fs.rm(f.root, { recursive: true, force: true }); });
+  const run = await f.review("implementation");
+  const seed = f.store.listFindingsForRun(run.id)[0]!;
+  for (let i = 0; i < 13; i++) {
+    f.store.insertFinding({ ...seed, id: `choice-${i}`, body: i === 12 ? "oversized".repeat(5000) : "facts".repeat(700),
+      state: "open", decision: null }, f.spec.id);
+    f.store.setFindingDecision(`choice-${i}`, "accepted_tradeoff", { kind: "accept_tradeoff", rationale: `Complete rationale ${i}`, decidedAt: i, decidedBy: "human" });
+  }
+  f.store.setFindingDecision(seed.id, "superseded", { kind: "request_fix", rationale: "Old request", decidedAt: 100, decidedBy: "human" });
+  const context = f.engine.reviewContext(f.spec.id, run, run.targetHash);
+  assert.ok(context.omittedDecisions > 1);
+  assert.equal(context.decisions.length + context.omittedDecisions, 13);
+  assert.ok(JSON.stringify(context.decisions).length <= context.decisionBudget);
+  assert.match(context.omissionReason!, /character budget/);
+  assert.equal(context.decisions[0]!.findingId, "choice-11");
+  assert.ok(!context.decisions.some((d) => d.findingId === "choice-12" || d.findingId === seed.id));
+  for (const entry of context.decisions) {
+    const stored = f.store.getFinding(entry.findingId)!;
+    assert.equal(entry.rationale, stored.decision!.rationale);
+    assert.equal(entry.body, stored.body);
+  }
+});
+
 test("review launch is refused when no Goldfish endpoint is configured", async () => {
   const { engine, spec } = await setup([], { configured: false });
   await assert.rejects(
@@ -99,7 +176,7 @@ test("review launch is refused when no Goldfish endpoint is configured", async (
   );
 });
 
-test("reviewers get a fresh, tool-less request containing only persona, standard, document and chosen context", async () => {
+test("reviewers get a fresh, tool-less request with guidelines, document and chosen context", async () => {
   const { root, endpoint, review } = await setup([{ content: "NO FINDINGS" }]);
   await fs.writeFile(path.join(root, "notes.md"), "context text");
   await fs.writeFile(path.join(root, "secret.md"), "not chosen");
@@ -107,6 +184,7 @@ test("reviewers get a fresh, tool-less request containing only persona, standard
   assert.equal(run.state, "completed");
   assert.equal(endpoint.requests.length, 1);
   const request = endpoint.requests[0]!;
+  assert.ok(request.messages[0]!.content.includes(reviewGuidelines));
   assert.equal(request.tools, undefined);
   assert.deepEqual(request.messages.map((m) => m.role), ["system", "user"]);
   const user = request.messages[1]!.content;

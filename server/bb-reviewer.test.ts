@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { BbReviewer } from "./bb-reviewer.ts";
+import { reviewGuidelines, stageMessages } from "./prompts.ts";
 
 type TurnCompletedData = { status: "completed" | "failed" | "interrupted"; error?: { message: string } };
 type EventRow = { type: string; data: TurnCompletedData };
-type SpawnRequest = { projectId: string; environment: { type: string; environmentId: string } };
+type SpawnRequest = { projectId: string; environment: { type: string; environmentId: string }; input: { type: string; text: string }[] };
 
 function bbFixture(event: EventRow | null, output = "NO FINDINGS") {
   const calls: { spawn: SpawnRequest[]; stop: string[]; archive: string[]; output: string[] } = { spawn: [], stop: [], archive: [], output: [] };
@@ -59,4 +60,17 @@ test("BB reviewers never fall back to the project default when the checkout is a
   });
   assert.equal(result.ok, false);
   assert.deepEqual(calls.spawn, []);
+});
+
+test("BB worker receives the same guideline and historical context messages", async () => {
+  const { bb, calls } = bbFixture({ type: "turn/completed", data: { status: "completed" } });
+  const messages = stageMessages({ plan: { lens: "structural", standard: "feature-spec-standard" },
+    mode: "REVIEW", specPath: "spec.md", specContent: "# Spec", context: [], earlierReports: [],
+    reviewContext: { runId: "r", currentHash: "current", decisions: [], decisionBudget: 32000,
+      omittedDecisions: 1, omissionReason: "Decision character budget", contextNotes: ["context file missing: source.md"] } });
+  await new BbReviewer(bb, async () => 1000).complete(messages, new AbortController().signal, {
+    projectId: "p", environmentId: "env", provider: null, model: null });
+  assert.equal(calls.spawn[0]!.input[0]!.text, messages.map((m) => `${m.role.toUpperCase()}:\n${m.content}`).join("\n\n"));
+  assert.ok(calls.spawn[0]!.input[0]!.text.includes(reviewGuidelines));
+  assert.match(calls.spawn[0]!.input[0]!.text, /source\.md/);
 });

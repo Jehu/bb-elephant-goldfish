@@ -14,6 +14,10 @@ Seven agent skills adapting the pinned Elephant-Goldfish Model to BB.
 ## Local Contracts
 
 - Frontmatter names match the seven names selected by `server.ts` configure().
+- The shared review contract is provided directly by plugin agent instructions
+  and Goldfish prompt assembly from `server/review-guidelines.md`. Do not copy
+  it into skills or rely on personally installed skills. Keep adapted workflows
+  consistent with its scope and preserve explicit human confirmation gates.
 - Preserve upstream Apache-2.0 attribution. Mark differences from upstream.
 - Resolve runtime references relative to the registered skill directory, not
   the user's working directory or the repository's upstream tree.

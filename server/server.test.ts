@@ -7,8 +7,27 @@ import path from "node:path";
 import { test } from "node:test";
 import Database from "better-sqlite3";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { createFakePluginHost, makePluginAgentConfigurationContext } from "@get-bb/plugin-sdk/testing";
 import plugin from "../server.ts";
 import { Store } from "./store.ts";
+import { reviewGuidelines } from "./prompts.ts";
+
+test("SDK reload and fresh session resolution retain the shared instructions", async () => {
+  const host = createFakePluginHost({ pluginId: "elephant-goldfish",
+    agentSkillIds: ["egm-brainstorm", "egm-draft", "egm-review", "egm-review-loop", "egm-resolve", "egm-drift-report", "egm-bootstrap"] });
+  let current = host;
+  try {
+    await plugin(host.bb);
+    const before = await host.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext());
+    assert.equal(before.instructions, reviewGuidelines);
+    assert.equal(before.tools.length, 6);
+    assert.equal(before.skills.length, 7);
+    current = await host.harness.lifecycle.reload(plugin);
+    const fresh = await current.harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: "fresh-session" } }));
+    assert.equal(fresh.instructions, reviewGuidelines);
+    assert.deepEqual(fresh.skills, before.skills);
+  } finally { await current.harness.lifecycle.dispose(); }
+});
 
 test("agent tools enforce project ownership", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "egm-tools-"));
@@ -56,6 +75,9 @@ test("agent tools enforce project ownership", async () => {
     }
     assert.equal(store.getFinding("finding-a")?.elephantNote, null);
     assert.equal(store.listProposals("spec-a").length, 0);
+    store.setFindingDecision("finding-a", "fix_requested", { kind: "request_fix", rationale: "Research the source before changing policy.", decidedAt: 2, decidedBy: "human" });
+    store.addEvent("spec-a", "run-a", "context", "context file missing: sources.md");
+    for (let i = 0; i < 120; i++) store.addEvent("spec-a", "run-a", "other", "noise");
     const status = await tools.get("egm_review_status")!({ specId: "spec-a" }, { projectId: "a", threadId: "thread-a" });
     // review_start only accepts specs and threads of the calling project.
     await assert.rejects(
@@ -72,6 +94,11 @@ test("agent tools enforce project ownership", async () => {
     const statusData = JSON.parse(status as string);
     assert.equal(statusData.spec.link.url, "/plugins/elephant-goldfish/specs/a/spec-a");
     assert.match(statusData.findings[0].link.directive, /findingId="finding-a"/);
+    assert.equal(statusData.reviewContext.runId, "run-a");
+    assert.equal(statusData.reviewContext.currentHash, statusData.spec.currentHash);
+    assert.equal(statusData.reviewContext.decisions[0].rationale, "Research the source before changing policy.");
+    assert.equal(statusData.reviewContext.decisions[0].reviewedHash, "hash");
+    assert.deepEqual(statusData.reviewContext.contextNotes, ["context file missing: sources.md"]);
     const proposed = JSON.parse(await tools.get("egm_propose")!({ specId: "spec-a", findingIds: ["finding-a"], content: "# Updated spec\n", summary: "Change" }, { projectId: "a", threadId: "thread-a" }) as string) as { id: string; baseHash: string; link: { url: string; directive: string } };
     assert.equal(proposed.link.url, `/plugins/elephant-goldfish/specs/a/spec-a/proposal/${proposed.id}`);
     assert.match(proposed.link.directive, /::egm-open\{projectId="a" specId="spec-a" proposalId="/);

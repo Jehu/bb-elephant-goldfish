@@ -837,4 +837,11 @@ export class Store {
       .all(specId, limit)
       .map((r) => ({ id: r.id, specId: r.spec_id, runId: r.run_id, kind: r.kind, message: r.message, at: r.at }));
   }
+
+  listContextNotes(specId: string, runId: string): string[] {
+    return this.db
+      .prepare<[string, string], { message: string }>("SELECT message FROM events WHERE spec_id = ? AND run_id = ? AND kind = 'context' ORDER BY id")
+      .all(specId, runId)
+      .map((r) => r.message);
+  }
 }

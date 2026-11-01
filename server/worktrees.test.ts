@@ -11,6 +11,7 @@ import { Engine, type ReviewEngine, type ReviewerCall } from "./engine.ts";
 import { MIGRATIONS, Store } from "./store.ts";
 import type { Checkout } from "./contract.ts";
 import { sha256 } from "./workspace.ts";
+import { reviewGuidelines } from "./prompts.ts";
 
 test("specs and confirmed apply stay in their worktree even when the author moves", async () => {
   const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "egm-worktrees-")));
@@ -58,6 +59,25 @@ test("specs and confirmed apply stay in their worktree even when the author move
     const sb = await call("egm_register_spec", { path: "spec.md" }, "b");
     const sm = await call("egm_register_spec", { path: "spec.md" }, "main");
     assert.equal(new Set([sa.id, sb.id, sm.id]).size, 3);
+    const store = new Store(db);
+    for (const [spec, label] of [[sa, "A"], [sb, "B"]] as const) {
+      store.insertRun({ id: `run-${label}`, specId: spec.id, projectId: "p", preset: "implementation", round: 1, maxRounds: 1,
+        state: "completed", stateReason: null, targetHash: sha256("# Original\n"), context: [], threadId: null,
+        engine: "goldfish", provider: null, model: null, parentRunId: null, reportDir: ".egm", createdAt: 1, finishedAt: 2, stale: false });
+      store.insertStage({ id: `stage-${label}`, runId: `run-${label}`, round: 1, position: 0, lens: "structural", standard: "feature-spec-standard",
+        state: "completed", engine: "goldfish", provider: null, model: null, workerThreadId: null, error: null, reportPath: null, startedAt: 1, finishedAt: 2 });
+      store.insertFinding({ id: `finding-${label}`, runId: `run-${label}`, stageId: `stage-${label}`, round: 1, lens: "structural",
+        severity: "major", rawSeverity: "major", title: `Policy ${label}`, body: `Facts ${label}`, lineStart: null, lineEnd: null,
+        state: "accepted_tradeoff", decision: { kind: "accept_tradeoff", rationale: `Only checkout ${label}`, decidedBy: "human", decidedAt: 3 },
+        elephantNote: null, proposalId: null, createdAt: 1 }, spec.id);
+      store.setFindingDecision(`finding-${label}`, "accepted_tradeoff", { kind: "accept_tradeoff", rationale: `Only checkout ${label}`, decidedBy: "human", decidedAt: 3 });
+      store.addEvent(spec.id, `run-${label}`, "context", `Missing ${label}`);
+    }
+    for (const [spec, thread, label] of [[sa, "a", "A"], [sb, "b", "B"]] as const) {
+      const context = (await call("egm_review_status", { specId: spec.id }, thread)).reviewContext;
+      assert.deepEqual(context.decisions.map((d: { rationale: string }) => d.rationale), [`Only checkout ${label}`]);
+      assert.deepEqual(context.contextNotes, [`Missing ${label}`]);
+    }
     assert.equal((await call("egm_register_spec", { path: "spec.md" }, "a")).id, sa.id);
     assert.deepEqual((await call("egm_specs", {}, "author")).specs.map((s: { id: string }) => s.id), [sa.id]);
     assert.equal((await rpc.workspace_search!({ threadId: "author", query: "spec" })).paths[0], "spec.md");
@@ -165,6 +185,7 @@ test("review context, reports, automatic rounds and restart receipts stay in the
     assert.equal(store.getRun(run.id)!.environmentId, "env-a");
     assert.equal(calls[0]!.call.environmentId, "env-a");
     assert.match(calls[0]!.text, /Context from A/);
+    assert.ok(calls[0]!.text.includes(reviewGuidelines));
     assert.doesNotMatch(calls[0]!.text, /Context from B/);
     assert.ok((await fs.readdir(path.join(a, run.reportDir))).includes("round-1"));
     await assert.rejects(fs.stat(path.join(b, ".egm")), /ENOENT/);

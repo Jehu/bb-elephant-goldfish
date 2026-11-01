@@ -27,6 +27,7 @@ import { checkoutKey, MIGRATIONS, Store, type SpecRecord } from "./server/store.
 import { Checkouts } from "./server/checkouts.ts";
 import { resolveInside, WorkspaceError } from "./server/workspace.ts";
 import { egmLink, type EgmTarget } from "./lib/egm-links.ts";
+import { reviewGuidelines } from "./server/prompts.ts";
 
 export { rpcContract };
 export type * from "./server/contract.ts";
@@ -360,6 +361,7 @@ export default async function plugin(bb: BbPluginApi) {
           spec: linkedSpec(spec),
           runs: (await runsWithStale(specId)).slice(0, 5),
           stages: latest ? store.listStages(latest.id) : [],
+          reviewContext: engine.reviewContext(specId, latest, spec.currentHash),
           findings: store.listFindings(specId).filter((f) => f.state !== "superseded").slice(0, 100).map((finding) => ({ ...finding, link: link({ projectId, specId, findingId: finding.id }) })),
           proposals: store.listProposals(specId).slice(0, 10).map(({ diff: _diff, ...rest }) => ({ ...rest, link: link({ projectId, specId, proposalId: rest.id }) })),
           next: linkInstruction,
@@ -411,7 +413,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.agents.configure(() => ({ tools: ELEPHANT_TOOLS, skills: SKILL_NAMES }));
+  bb.agents.configure(() => ({ tools: ELEPHANT_TOOLS, skills: SKILL_NAMES, instructions: reviewGuidelines }));
 
   bb.cli.register({
     name: "egm",

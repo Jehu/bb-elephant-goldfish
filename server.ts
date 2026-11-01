@@ -6,7 +6,6 @@
 //   register specs, start reviews, read findings, contest, propose.
 //   Deciding findings and applying proposals are human-only (RPC from the UI).
 // - Skills in skills/ adapt the seven upstream EGM skills to these tools.
-import { existsSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
@@ -18,12 +17,14 @@ import {
   STANDARD_IDS,
   rpcContract,
   type Run,
+  type Checkout,
   type Spec,
 } from "./server/contract.ts";
 import { Engine, EngineError } from "./server/engine.ts";
 import { BbReviewer } from "./server/bb-reviewer.ts";
 import { GoldfishClient, normalizeBaseUrl } from "./server/goldfish.ts";
-import { MIGRATIONS, Store } from "./server/store.ts";
+import { checkoutKey, MIGRATIONS, Store, type SpecRecord } from "./server/store.ts";
+import { Checkouts } from "./server/checkouts.ts";
 import { resolveInside, WorkspaceError } from "./server/workspace.ts";
 import { egmLink, type EgmTarget } from "./lib/egm-links.ts";
 
@@ -75,9 +76,14 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   const db = bb.storage.database();
-  db.pragma("foreign_keys = ON");
-  bb.storage.migrate(db, MIGRATIONS);
+  // SQLite cannot replace a referenced table with FK enforcement enabled
+  // inside migrate's transaction. Restore enforcement even when migration fails.
+  db.pragma("foreign_keys = OFF");
+  try { bb.storage.migrate(db, MIGRATIONS); }
+  finally { db.pragma("foreign_keys = ON"); }
+  if ((db.pragma("foreign_key_check") as unknown[]).length) throw new Error("EGM database has invalid foreign keys after migration.");
   const store = new Store(db);
+  const checkouts = new Checkouts(bb);
 
   const goldfish = new GoldfishClient(async () => {
     const value = await settings.get();
@@ -90,7 +96,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
   const bbReviewer = new BbReviewer(bb, async () => Math.max(10, Number((await settings.get()).goldfishTimeoutSeconds ?? 300)) * 1000);
   const reviewer = async () => ((await settings.get()).reviewerEngine === "goldfish" ? goldfish : bbReviewer);
-  const snapshotReviewer = async (threadId: string | null) => {
+  const snapshotReviewer = async () => {
     const selected = await reviewer();
     if (selected.engine === "goldfish") {
       const value = await settings.get();
@@ -98,36 +104,35 @@ export default async function plugin(bb: BbPluginApi) {
       const model = String(value.goldfishModel ?? "").trim();
       return { engine: "goldfish" as const, provider: baseUrl || null, model: model || null, environmentId: null };
     }
-    const thread = threadId ? await bb.sdk.threads.get({ threadId }) : null;
-    const environmentId = thread?.environmentId ?? null;
-    return { engine: "bb" as const, provider: null, model: null, environmentId };
+    return { engine: "bb" as const, provider: null, model: null, environmentId: null };
   };
 
-  // The plugin reads and writes spec files from the BB server process, so a
-  // project counts only when one of its local sources exists on this machine.
-  const projectRoot = async (projectId: string): Promise<string | null> => {
-    try {
-      const project = await bb.sdk.projects.get({ projectId });
-      const sources = [...project.sources].sort((a, b) => Number(b.isDefault) - Number(a.isDefault));
-      return sources.find((source) => source.type === "local_path" && existsSync(source.path))?.path ?? null;
-    } catch {
-      return null;
-    }
-  };
   const changed = (projectId: string, specId: string | null) => bb.realtime.publish(CHANGED_CHANNEL, { projectId, specId });
 
-  const engine = new Engine({ store, goldfish, reviewer: () => bbReviewer, currentReviewer: snapshotReviewer, threadProject: async (threadId) => (await bb.sdk.threads.get({ threadId })).projectId, projectRoot, changed, log: bb.log });
+  const engine = new Engine({ store, goldfish, reviewer: () => bbReviewer, currentReviewer: snapshotReviewer, threadProject: async (threadId) => (await bb.sdk.threads.get({ threadId })).projectId, checkoutRoot: (projectId, checkout) => checkouts.validate(projectId, checkout), changed, log: bb.log });
   await engine.reconcile();
 
-  const describeAll = async (projectId: string): Promise<Spec[]> => {
+  const describeAll = async (projectId: string, checkout?: Checkout | null): Promise<Spec[]> => {
     const out: Spec[] = [];
-    for (const record of store.listSpecs(projectId)) out.push((await engine.describeSpec(record)).spec);
+    for (const record of store.listSpecs(projectId)) {
+      if (checkout && record.checkout && checkoutKey(record.checkout) !== checkoutKey(checkout)) continue;
+      out.push((await engine.describeSpec(record)).spec);
+    }
     return out;
   };
 
   const requireProjectSpec = (specId: string, projectId: string) => {
     const spec = store.getSpec(specId);
     if (!spec || spec.projectId !== projectId) throw new EngineError("Unknown spec.");
+    return spec;
+  };
+
+  const requireThreadSpec = async (specId: string, projectId: string, threadId: string): Promise<SpecRecord> => {
+    const spec = requireProjectSpec(specId, projectId);
+    const checkout = await checkouts.thread(projectId, threadId);
+    if (!spec.checkout || checkoutKey(spec.checkout) !== checkoutKey(checkout)) {
+      throw new EngineError("This spec belongs to a different checkout or needs an explicit checkout assignment. Use a thread in its checkout.");
+    }
     return spec;
   };
 
@@ -154,7 +159,7 @@ export default async function plugin(bb: BbPluginApi) {
       const projects = await bb.sdk.projects.list();
       const out = [];
       for (const project of projects) {
-        out.push({ id: project.id, name: project.name, root: await projectRoot(project.id) });
+        out.push({ id: project.id, name: project.name, root: (await checkouts.list(project.id))[0]?.root ?? null });
       }
       return { projects: out, current: null };
     },
@@ -169,10 +174,24 @@ export default async function plugin(bb: BbPluginApi) {
     },
     reviewer_status: async () => (await (await reviewer()).status()),
 
-    specs_list: ({ projectId }) =>
-      guard(async () => ({ specs: await describeAll(projectId), root: await projectRoot(projectId) })),
-    specs_register: ({ projectId, path }) =>
-      guard(async () => (await engine.describeSpec(await engine.registerSpec(projectId, path))).spec),
+    specs_list: ({ projectId, threadId }) =>
+      guard(async () => {
+        const checkout = threadId ? await checkouts.thread(projectId, threadId) : null;
+        return { specs: await describeAll(projectId, checkout), root: checkout?.root ?? null };
+      }),
+    checkouts_list: ({ projectId }) => guard(async () => ({ checkouts: await checkouts.list(projectId) })),
+    specs_register: ({ projectId, path, threadId, environmentId }) =>
+      guard(async () => {
+        if (!threadId && !environmentId) throw new EngineError("Choose a checkout before registering a spec.");
+        const checkout = threadId ? await checkouts.thread(projectId, threadId) : await checkouts.environment(projectId, environmentId!);
+        if (environmentId && environmentId !== checkout.environmentId) throw new EngineError("Thread and selected checkout do not match.");
+        return (await engine.describeSpec(await engine.registerSpec(projectId, path, checkout))).spec;
+      }),
+    spec_bind_checkout: ({ specId, environmentId }) => guard(async () => {
+      const spec = store.getSpec(specId);
+      if (!spec) throw new EngineError("Unknown spec.");
+      return (await engine.describeSpec(await engine.bindCheckout(specId, await checkouts.environment(spec.projectId, environmentId)))).spec;
+    }),
     specs_forget: ({ specId }) => guard(async () => ({ removed: await engine.forgetSpec(specId) })),
     spec_detail: ({ specId }) =>
       guard(async () => {
@@ -192,22 +211,25 @@ export default async function plugin(bb: BbPluginApi) {
     thread_overview: ({ threadId }) =>
       guard(async () => {
         const thread = await bb.sdk.threads.get({ threadId });
-        const specs = await describeAll(thread.projectId);
+        let workspaceError: string | null = null;
+        const checkout = await checkouts.thread(thread.projectId, threadId).catch(cause => {
+          workspaceError = cause instanceof Error ? cause.message : String(cause);
+          return null;
+        });
+        const specs = checkout ? await describeAll(thread.projectId, checkout) : [];
         const activeRuns: Run[] = [];
         for (const spec of specs) {
           for (const run of await runsWithStale(spec.id)) {
             if (run.state === "running" || run.state === "awaiting_decisions") activeRuns.push(run);
           }
         }
-        return { projectId: thread.projectId, specs, activeRuns };
+        return { projectId: thread.projectId, checkout, workspaceError, specs, activeRuns };
       }),
     review_start: (input) =>
         guard(async () => {
           requireProjectSpec(input.specId, input.projectId);
-          if (input.threadId && (await bb.sdk.threads.get({ threadId: input.threadId })).projectId !== input.projectId) {
-            throw new EngineError("Thread does not belong to this project.");
-          }
-          const snapshot = await snapshotReviewer(input.threadId);
+          if (input.threadId) await requireThreadSpec(input.specId, input.projectId, input.threadId);
+          const snapshot = await snapshotReviewer();
         return engine.startRun(input.specId, {
           preset: input.preset,
           ...(input.lenses ? { lenses: input.lenses } : {}),
@@ -226,16 +248,9 @@ export default async function plugin(bb: BbPluginApi) {
     workspace_search: ({ threadId, query }) =>
       guard(async () => {
         const thread = await bb.sdk.threads.get({ threadId });
-        const root = await projectRoot(thread.projectId);
-        if (!root || !thread.environmentId) throw new EngineError("Thread workspace is unavailable. Open a thread with an available project checkout and retry.");
-        const environment = await bb.sdk.environments.get({ environmentId: thread.environmentId });
-        const project = await bb.sdk.projects.get({ projectId: thread.projectId });
-        const sources = [...project.sources].sort((a, b) => Number(b.isDefault) - Number(a.isDefault));
-        const source = sources.find((item) => item.type === "local_path" && existsSync(item.path));
-        if (environment.projectId !== thread.projectId || environment.status !== "ready" || !environment.path || !source || environment.hostId !== source.hostId || await fs.realpath(environment.path).catch(() => null) !== await fs.realpath(root).catch(() => null)) {
-          throw new EngineError("Thread workspace does not match the server's available project checkout. Open a thread in that checkout and retry.");
-        }
-        const result = await bb.sdk.environments.paths({ environmentId: thread.environmentId, query, includeFiles: "true", includeDirectories: "false" });
+        const checkout = await checkouts.thread(thread.projectId, threadId);
+        const root = checkout.root;
+        const result = await bb.sdk.environments.paths({ environmentId: checkout.environmentId, query, includeFiles: "true", includeDirectories: "false" });
         const paths: string[] = [];
         for (const entry of result.paths) {
           if (entry.kind !== "file" || !entry.path || path.isAbsolute(entry.path)) continue;
@@ -268,12 +283,13 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "egm_specs",
-    description: "List the specs registered in this project's Elephant Goldfish workspace, with review state and open findings.",
+    description: "List the specs registered in the invoking thread's checkout, including a worktree, with review state and open findings. Registrations in other checkouts have separate IDs and histories.",
     presentation: { label: { pending: "Listing specs", completed: "Listed specs" } },
     parameters: z.object({}),
-    async execute(_params, { projectId }) {
+    async execute(_params, { projectId, threadId }) {
       try {
-        return asText({ root: await projectRoot(projectId), specs: (await describeAll(projectId)).map(linkedSpec), next: linkInstruction });
+        const checkout = await checkouts.thread(projectId, threadId);
+        return asText({ root: checkout.root, checkout, specs: (await describeAll(projectId, checkout)).map(linkedSpec), next: linkInstruction });
       } catch (cause) {
         return toolError(cause);
       }
@@ -282,12 +298,13 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "egm_register_spec",
-    description: "Register a Markdown spec (project-relative path) in the Elephant Goldfish workspace so it can be reviewed.",
+    description: "Register a Markdown spec relative to the invoking thread's checkout, including a worktree. The spec and its reviews and proposals remain bound to that checkout; the same path in another checkout is a separate registration.",
     presentation: { label: { pending: "Registering spec", completed: "Registered spec" } },
     parameters: z.object({ path: z.string().min(1).max(1024) }),
-    async execute({ path }, { projectId }) {
+    async execute({ path }, { projectId, threadId }) {
       try {
-        return asText({ ...linkedSpec((await engine.describeSpec(await engine.registerSpec(projectId, path))).spec), next: linkInstruction });
+        const checkout = await checkouts.thread(projectId, threadId);
+        return asText({ ...linkedSpec((await engine.describeSpec(await engine.registerSpec(projectId, path, checkout))).spec), next: linkInstruction });
       } catch (cause) {
         return toolError(cause);
       }
@@ -309,11 +326,8 @@ export default async function plugin(bb: BbPluginApi) {
     }),
     async execute(params, { projectId, threadId }) {
       try {
-        requireProjectSpec(params.specId, projectId);
-        if (threadId && (await bb.sdk.threads.get({ threadId })).projectId !== projectId) {
-          throw new EngineError("Thread does not belong to this project.");
-        }
-        const snapshot = await snapshotReviewer(threadId);
+        await requireThreadSpec(params.specId, projectId, threadId);
+        const snapshot = await snapshotReviewer();
         if (snapshot.engine === "bb" && !store.hasReviewerConsent()) throw new EngineError("BB reviewer consent is required in the Elephant Goldfish tab before launch.");
         const run = await engine.startRun(params.specId, {
           preset: params.preset,
@@ -337,9 +351,9 @@ export default async function plugin(bb: BbPluginApi) {
       "Read a spec's review state: runs, stages, findings (with ids, severity, state, human decisions) and proposals. Use it to see what the human decided and which findings wait for you.",
     presentation: { label: { pending: "Reading review status", completed: "Read review status" } },
     parameters: z.object({ specId: z.string() }),
-    async execute({ specId }, { projectId }) {
+    async execute({ specId }, { projectId, threadId }) {
       try {
-        const record = requireProjectSpec(specId, projectId);
+        const record = await requireThreadSpec(specId, projectId, threadId);
         const { spec } = await engine.describeSpec(record);
         const latest = store.latestRun(specId);
         return asText({
@@ -362,11 +376,11 @@ export default async function plugin(bb: BbPluginApi) {
       "As the Elephant, argue that a finding does not apply, with the rationale from your context. This does not resolve it: the human decides in the Elephant Goldfish tab.",
     presentation: { label: { pending: "Contesting finding", completed: "Contested finding" } },
     parameters: z.object({ findingId: z.string(), rationale: z.string().min(1).max(4000) }),
-    async execute({ findingId, rationale }, { projectId }) {
+    async execute({ findingId, rationale }, { projectId, threadId }) {
       try {
         const finding = store.getFinding(findingId);
         if (!finding) throw new EngineError("Unknown finding.");
-        requireProjectSpec(finding.specId, projectId);
+        await requireThreadSpec(finding.specId, projectId, threadId);
         return asText({ ...await engine.contest(findingId, rationale), link: link({ projectId, specId: finding.specId, findingId }), next: linkInstruction });
       } catch (cause) {
         return toolError(cause);
@@ -387,7 +401,7 @@ export default async function plugin(bb: BbPluginApi) {
     }),
     async execute({ specId, findingIds, content, summary }, { projectId, threadId }) {
       try {
-        requireProjectSpec(specId, projectId);
+        await requireThreadSpec(specId, projectId, threadId);
         const proposal = await engine.propose(specId, findingIds, content, summary, threadId);
         const { diff, ...rest } = proposal;
         return asText({ ...rest, diffLines: diff.split("\n").length, link: link({ projectId, specId, proposalId: proposal.id }), next: `${linkInstruction} Ask the human to inspect and explicitly confirm the diff there.` });

@@ -66,5 +66,12 @@ BB 0.47 or newer, Plugin SDK 0.6.79, and a local project checkout visible to
 the BB server. Markdown specs live in your repository. BB workers use the
 provider and model configured for the reviewed project's BB environment; the
 Advanced endpoint mode needs an OpenAI-compatible endpoint and key instead.
-The plugin works with local sources and does not operate on specs stored on
-another enrolled machine.
+The plugin supports the main checkout and local worktrees. Each spec and its
+review history belong to one checkout; identical paths in different worktrees
+are separate registrations. Thread registration uses the thread's checkout;
+the project page offers an explicit checkout selection. Reviews, context,
+reports, BB workers and confirmed changes use the registered checkout, even
+after a thread switches environments. The apply confirmation shows the target.
+Older registrations need explicit checkout assignment before file operations;
+their history is retained and earlier unapplied proposals must be recreated.
+The plugin does not operate on specs stored on another enrolled machine.

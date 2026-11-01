@@ -176,11 +176,25 @@ an explicit reading list: linked files and URLs are not fetched automatically.
   stages are marked failed. If neither hash matches, the apply outcome is
   unknown, the backup is retained, and affected findings are released for
   decisions. The plugin never blindly re-applies a change.
-- The plugin works with local project sources visible to the BB server. It
-  does not currently read or apply specs on another enrolled machine.
-  Workspace choices must correspond to the same authorized local checkout for
-  operations on registered specs; an incompatible thread environment cannot
-  silently target a different checkout.
+- The plugin supports the main checkout and multiple worktrees on the BB
+  server's machine. Registration in a thread uses that thread's checkout;
+  registration on the project page requires a checkout selection. The same
+  relative Markdown path in different checkouts has separate spec IDs and
+  review histories. Threads sharing a checkout share its spec registrations.
+- Each registered spec stays bound to its host and canonical checkout path.
+  Reviews read the spec and context there, write reports there, and launch BB
+  workers in its environment. Proposals, confirmed apply, automatic reviews
+  and restart recovery retain the same target even if the author thread moves.
+  The list, detail and apply confirmation show the checkout. A direct link
+  opens the original registration; it never selects another copy of the file.
+- Specs registered before checkout binding need a one-time explicit assignment
+  of their original checkout in the workspace. Their IDs and history remain.
+  Earlier unapplied proposals lack checkout provenance and must be recreated;
+  start a fresh review to continue old review rounds. Unfinished apply intents
+  retain their recorded target and must be reconciled before assignment.
+- Missing, moved or unavailable environments are reported without falling back
+  to the main checkout. The plugin does not read or apply specs on another
+  enrolled machine, even when that machine uses identical path names.
 - No commits or issue sync are performed by the plugin.
 
 ## Development

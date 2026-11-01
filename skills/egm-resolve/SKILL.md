@@ -26,5 +26,6 @@ You hold the context the Goldfish lacked. Use it to judge each finding. Never ag
 ## Rules
 
 - **Never edit the spec file directly**, not even for a one-line fix. Only a human-confirmed proposal changes it. If the proposal turns stale (the file changed), read the new version and propose again.
+- Read the `spec.checkout` returned by `egm_review_status` before reading the file. Work in that checkout, including its worktree; do not read or revise the same path in the main checkout instead. A thread in another checkout cannot propose changes for this spec. Report unavailable or unassigned checkouts and let the human select the matching environment or explicitly assign the original checkout; do not guess. Confirmed apply retains the registered target even if the author thread later moves.
 - Only the human decides: request fix, accept as a trade-off (with a reason), or dismiss. Accepted trade-offs are kept risks, not fixes; never describe them as fixed.
 - Severity labels are the reviewer's; do not relabel them.

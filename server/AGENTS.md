@@ -13,6 +13,8 @@ spec changes for the Elephant Goldfish BB plugin.
 - `goldfish.ts`: fresh, tool-less OpenAI-compatible review calls.
 - `prompts.ts`: pinned personas/standards, presets and finding parser.
 - `workspace.ts`: confined file reads and compare-and-replace apply protocol.
+- `checkouts.ts`: BB environment resolution, server-local host verification and
+  validation of persisted checkout identities.
 - `diff.ts`: unified diff generation.
 - Root `server.ts` owns BB registration and the Elephant agent tools.
 
@@ -55,12 +57,26 @@ spec changes for the Elephant Goldfish BB plugin.
   the applied result hash; a different current version makes the run stale.
   Never hide cancellation, limits, stale versions or partial results.
 - Append SQLite migrations; never alter or reorder shipped migrations.
+- Specs are unique by project, host, canonical checkout root and relative path.
+  Bind the checkout at registration; never retarget an existing spec when a
+  thread, environment path or preferred project source changes. Runs, context,
+  reports, proposals, apply and automatic reviews use that binding. BB workers
+  require its explicit environment, never the project default.
+- Legacy specs require explicit checkout assignment before file operations.
+  Keep their IDs and history; proposals without checkout provenance cannot be
+  applied. Binding stales legacy pending proposals and completed/waiting runs,
+  releases proposal findings and removes deferred automatic review tasks.
+- The checkout migration replaces the referenced specs table. Disable foreign
+  keys outside the migration transaction, restore them in finally, and check
+  foreign_key_check. Preserve every dependent row and any saved apply target.
 - Specs/reports remain Markdown; SQLite is the durable workflow index.
 - Elephant tools must only access specs and findings owned by their invoking
   project. Composer requests are drafts only; the human sends them.
-- Workspace search resolves the thread environment and returns confined regular
-  files only when its host and checkout match the server-local project root.
-  Missing or mismatched workspaces and search failures are reported, not guessed.
+- Workspace search and thread-scoped tools resolve the actual thread checkout,
+  including worktrees. Refuse cross-checkout mutations, unavailable environments
+  and remote hosts, even when paths or file hashes match. A temporary random
+  marker read through the host SDK verifies server-local filesystem visibility;
+  dispose it on unload. Historical links keep the registered spec's target.
 
 ## Work Guidance
 
@@ -73,6 +89,8 @@ spec changes for the Elephant Goldfish BB plugin.
 - `npm test`: real temporary SQLite and workspace files, no wall-clock sleeps
   (exception: the registered-RPC smoke polls the background run once against a
   live stub endpoint).
+- `server/worktrees.test.ts`: real Git worktrees, legacy migration/reference
+  preservation, pinned review context/reports/environments and apply recovery.
 - `npm run build`; then `bb plugin reload elephant-goldfish` for a live check.
 
 ## Child DOX Index

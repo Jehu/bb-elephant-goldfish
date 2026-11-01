@@ -5,7 +5,7 @@ import { BbReviewer } from "./bb-reviewer.ts";
 
 type TurnCompletedData = { status: "completed" | "failed" | "interrupted"; error?: { message: string } };
 type EventRow = { type: string; data: TurnCompletedData };
-type SpawnRequest = { projectId: string };
+type SpawnRequest = { projectId: string; environment: { type: string; environmentId: string } };
 
 function bbFixture(event: EventRow | null, output = "NO FINDINGS") {
   const calls: { spawn: SpawnRequest[]; stop: string[]; archive: string[]; output: string[] } = { spawn: [], stop: [], archive: [], output: [] };
@@ -28,11 +28,12 @@ test("BB reviewer binds a spawned worker to the run project and persists its ID 
   const reviewer = new BbReviewer(bb, async () => 1_000);
   const workers: string[] = [];
   const result = await reviewer.complete([{ role: "user", content: "review this" }], new AbortController().signal, {
-    projectId: "project-1", environmentId: null, provider: null, model: null,
+    projectId: "project-1", environmentId: "worktree-a", provider: null, model: null,
     onWorkerThread: (id) => workers.push(id),
   });
   assert.deepEqual(workers, ["worker-1"]);
   assert.equal(calls.spawn[0]?.projectId, "project-1");
+  assert.deepEqual(calls.spawn[0]?.environment, { type: "reuse", environmentId: "worktree-a" });
   assert.equal(result.ok, true);
   assert.deepEqual(calls.output, ["worker-1"]);
   assert.deepEqual(calls.stop, []);
@@ -43,10 +44,19 @@ test("BB reviewer rejects a failed terminal turn, never reads output, then stops
   const { bb, calls } = bbFixture({ type: "turn/completed", data: { status: "failed", error: { message: "provider failed" } } });
   const reviewer = new BbReviewer(bb, async () => 1_000);
   const result = await reviewer.complete([{ role: "user", content: "review this" }], new AbortController().signal, {
-    projectId: "project-1", environmentId: null, provider: null, model: null,
+    projectId: "project-1", environmentId: "worktree-a", provider: null, model: null,
   });
   assert.deepEqual(result, { ok: false, kind: "failed", error: "provider failed" });
   assert.deepEqual(calls.output, []);
   assert.deepEqual(calls.stop, ["worker-1"]);
   assert.deepEqual(calls.archive, ["worker-1"]);
+});
+
+test("BB reviewers never fall back to the project default when the checkout is absent", async () => {
+  const { bb, calls } = bbFixture(null);
+  const result = await new BbReviewer(bb, async () => 1_000).complete([], new AbortController().signal, {
+    projectId: "project-1", environmentId: null, provider: null, model: null,
+  });
+  assert.equal(result.ok, false);
+  assert.deepEqual(calls.spawn, []);
 });

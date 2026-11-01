@@ -27,11 +27,12 @@ export class BbReviewer {
     let threadId: string | null = null;
     let mustStop = false;
     try {
+      if (!call.environmentId) throw new Error("A bound checkout environment is required for BB reviewers.");
       const spawned = await this.bb.sdk.threads.spawn({
         projectId: call.projectId,
         input: [{ type: "text", text: prompt, mentions: [], visibility: "agent-only" }],
         origin: "plugin",
-        environment: call.environmentId ? { type: "reuse", environmentId: call.environmentId } : { type: "project-default" },
+        environment: { type: "reuse", environmentId: call.environmentId },
         ...(call.provider ? { providerId: call.provider } : {}),
         ...(call.model ? { model: call.model } : {}),
       });

@@ -79,6 +79,7 @@ Default section order:
 When the user requests a durable behavior change, record it here or in the relevant child AGENTS.md
 
 - Review limit badges name the specific cause (rounds, output, rate limit or timeout) in both the overview and review details; retain the detailed reason.
+- Worktree support is required: bind specs, reviews and proposals to their checkout and apply confirmed changes there. Rejecting all worktrees is insufficient; never silently redirect their operations to the main checkout.
 
 ## Project Guidance
 

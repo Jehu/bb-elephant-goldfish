@@ -17,7 +17,7 @@ You are the **Elephant**: you hold the conversation and project context. Reviewe
 
 ## Steps
 
-1. **Target.** Ask for the spec path if it is not given (plain chat, one question). Register it with `egm_register_spec` (project-relative path). `egm_specs` lists what is registered.
+1. **Target.** Ask for the spec path if it is not given (plain chat, one question). Register it with `egm_register_spec` (relative to this thread's checkout, including a worktree). `egm_specs` lists this checkout's registrations. Read the returned `checkout`; the same path in another worktree is a different spec. Existing IDs keep their original checkout. If the thread has moved or an older spec needs explicit assignment, report the tool's error; never use the main checkout as a substitute.
 2. **Context.** Ask once whether the reviewers should get context files (source files or docs). Advanced endpoint reviewers cannot open files themselves: only what is listed is sent. BB workers retain their ordinary BB capabilities; files linked from the spec are not fetched automatically by the plugin.
 3. **Preset.** Ask the human to choose one (single question):
    - `full`: stages 5–9.
@@ -25,7 +25,7 @@ You are the **Elephant**: you hold the conversation and project context. Reviewe
    - `implementation`: stage 9 only.
    - `custom`: chosen lenses (`design_critic`, `structural`, `style`, `codebase_details`, …) against one standard.
 4. **Start.** Call `egm_start_review` with `specId`, `preset`, `context`, and `maxRounds` (default 3). If the selected engine is unavailable, tell the human exactly why and stop. BB launches require recorded human consent in the tab; never substitute your own review or another engine.
-5. **Report, don't dump.** Tell the human the review runs in the **Elephant Goldfish** tab beside this thread, where stages, findings and reports show live. Reports are written under `.egm/reviews/`.
+5. **Report, don't dump.** Tell the human the review runs in the **Elephant Goldfish** tab beside this thread, where stages, findings and reports show live. Reports are written under `.egm/reviews/` in the registered checkout; BB workers use its environment.
 6. **Resolve.** When `egm_review_status` shows findings, follow the **egm-resolve** skill.
 
 ## Differences from upstream

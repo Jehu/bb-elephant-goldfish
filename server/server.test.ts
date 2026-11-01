@@ -20,7 +20,12 @@ test("agent tools enforce project ownership", async () => {
     pluginId: "elephant-goldfish",
     settings: { define: () => ({ get: async () => ({ goldfishBaseUrl: "", goldfishModel: "", goldfishApiKey: "", goldfishApiKeyEnv: "", goldfishTimeoutSeconds: 30 }) }) },
     storage: { database: () => db, migrate: (_db: unknown, migrations: string[]) => migrations.forEach((sql) => db.exec(sql)) },
-    sdk: { projects: { get: async () => ({ sources: [{ type: "local_path", path: root, isDefault: true }] }) }, threads: { get: async ({ threadId }: { threadId: string }) => ({ projectId: threadId === "thread-a" ? "a" : "other" }) } },
+    sdk: {
+      projects: { get: async () => ({ sources: [{ type: "local_path", path: root, isDefault: true }] }) },
+      threads: { get: async ({ threadId }: { threadId: string }) => ({ projectId: threadId === "thread-a" ? "a" : "other", environmentId: "env" }) },
+      environments: { get: async () => ({ projectId: "a", hostId: "host", path: root, status: "ready" }) },
+      files: { read: async ({ path: file }: { path: string }) => ({ content: await fs.readFile(file, "utf8"), contentEncoding: "utf8" }) },
+    },
     realtime: { publish: () => {} }, log: { info: () => {}, warn: () => {} },
     rpc: { register: (_contract: unknown, handlers: typeof rpc) => { rpc = handlers; } },
     agents: { registerTool: (tool: { name: string; parameters: { safeParse: (value: unknown) => { success: boolean } }; execute: (params: Record<string, unknown>, context: { projectId: string; threadId: string }) => Promise<unknown> }) => { tools.set(tool.name, tool.execute); schemas.set(tool.name, tool.parameters); }, configure: () => {} },
@@ -30,7 +35,7 @@ test("agent tools enforce project ownership", async () => {
     await fs.writeFile(path.join(root, "spec.md"), "# Spec\n");
     await plugin(bb as unknown as BbPluginApi);
     const store = new Store(db);
-    store.insertSpec({ id: "spec-a", projectId: "a", path: "spec.md", title: "Spec", createdAt: 1 });
+    store.insertSpec({ id: "spec-a", projectId: "a", path: "spec.md", title: "Spec", createdAt: 1, checkout: { hostId: "host", root: await fs.realpath(root), environmentId: "env" } });
     store.insertRun({ id: "run-a", specId: "spec-a", projectId: "a", preset: "implementation", round: 1, maxRounds: 1, state: "awaiting_decisions", stateReason: null, targetHash: "hash", context: [], threadId: "thread-a", engine: "goldfish", provider: null, model: null, parentRunId: null, reportDir: ".egm", createdAt: 1, finishedAt: null, stale: false });
     store.insertStage({ id: "stage-a", runId: "run-a", round: 1, position: 1, lens: "structural", standard: "feature-spec-standard", state: "completed", engine: "goldfish", provider: null, model: null, workerThreadId: null, error: null, reportPath: null, startedAt: null, finishedAt: null });
     store.insertFinding({ id: "finding-a", runId: "run-a", stageId: "stage-a", round: 1, lens: "structural", severity: "major", rawSeverity: "major", title: "Finding", body: "Body", lineStart: null, lineEnd: null, state: "open", decision: null, elephantNote: null, proposalId: null, createdAt: 1 }, "spec-a");
@@ -119,6 +124,10 @@ test("workspace search uses the thread checkout and returns confined files", asy
     storage: { database: () => db, migrate: (_db: unknown, migrations: string[]) => migrations.forEach((sql) => db.exec(sql)) },
     sdk: {
       projects: { get: async () => ({ sources: [{ type: "local_path", path: root, hostId: "host", isDefault: true }] }) },
+      files: { read: async ({ hostId, path: file }: { hostId: string; path: string }) => {
+        if (hostId !== "host") throw new Error("remote file unavailable");
+        return { content: await fs.readFile(file, "utf8"), contentEncoding: "utf8" };
+      } },
       threads: { get: async ({ threadId }: { threadId: string }) => ({ projectId: "a", environmentId: threadId === "missing" ? null : "env" }) },
       environments: {
         get: async () => environment,
@@ -140,14 +149,14 @@ test("workspace search uses the thread checkout and returns confined files", asy
     assert.deepEqual(await rpc.workspace_search!({ threadId: "thread", query: "none" }), { paths: [], truncated: false });
     await assert.rejects(rpc.workspace_search!({ threadId: "missing", query: "" }), /unavailable/);
     environment = { ...environment, path: other };
-    await assert.rejects(rpc.workspace_search!({ threadId: "thread", query: "" }), /does not match/);
+    assert.deepEqual(await rpc.workspace_search!({ threadId: "thread", query: "" }), { paths: [], truncated: false });
     environment = { ...environment, path: root, hostId: "remote" };
-    await assert.rejects(rpc.workspace_search!({ threadId: "thread", query: "" }), /does not match/);
+    await assert.rejects(rpc.workspace_search!({ threadId: "thread", query: "" }), /not available/);
     environment = { ...environment, hostId: "host", projectId: "other" };
-    await assert.rejects(rpc.workspace_search!({ threadId: "thread", query: "" }), /does not match/);
+    await assert.rejects(rpc.workspace_search!({ threadId: "thread", query: "" }), /another project/);
     environment = { ...environment, projectId: "a", status: "stopped" };
-    await assert.rejects(rpc.workspace_search!({ threadId: "thread", query: "" }), /does not match/);
-    assert.equal(searches.length, 2, "incompatible checkouts must not be searched");
+    await assert.rejects(rpc.workspace_search!({ threadId: "thread", query: "" }), /unavailable/);
+    assert.equal(searches.length, 3, "unavailable and foreign checkouts must not be searched");
     environment = { ...environment, status: "ready" };
     failSearch = true;
     await assert.rejects(rpc.workspace_search!({ threadId: "thread", query: "" }), /search failed/);
@@ -194,6 +203,8 @@ test("a registered ad hoc RPC apply launches the configured Goldfish engine, nev
     storage: { database: () => db, migrate: (_db: unknown, migrations: string[]) => migrations.forEach((sql) => db.exec(sql)) },
     sdk: {
       projects: { get: async () => ({ sources: [{ type: "local_path", path: root, isDefault: true }] }) },
+      environments: { get: async () => ({ projectId: "a", hostId: "host", path: root, status: "ready" }) },
+      files: { read: async ({ path: file }: { path: string }) => ({ content: await fs.readFile(file, "utf8"), contentEncoding: "utf8" }) },
       threads: { get: async ({ threadId }: { threadId: string }) => { threadCalls.push(threadId); return { projectId: "a", environmentId: "env-1" }; } },
     },
     realtime: { publish: () => {} }, log: { info: () => {}, warn: () => {} },
@@ -205,7 +216,7 @@ test("a registered ad hoc RPC apply launches the configured Goldfish engine, nev
     await fs.writeFile(path.join(root, "spec.md"), "# Spec\n\nFirst.\n");
     await plugin(bb as unknown as BbPluginApi);
     const store = new Store(db);
-    store.insertSpec({ id: "spec-a", projectId: "a", path: "spec.md", title: "Spec", createdAt: 1 });
+    store.insertSpec({ id: "spec-a", projectId: "a", path: "spec.md", title: "Spec", createdAt: 1, checkout: { hostId: "host", root: await fs.realpath(root), environmentId: "env-1" } });
     const proposed = JSON.parse(await tools.get("egm_propose")!({ specId: "spec-a", findingIds: [], content: "# Spec\n\nUpdated.\n", summary: "Change" }, { projectId: "a", threadId: "thread-a" }) as string) as { id: string; baseHash: string };
     const applied = await rpc.proposal_apply!({ proposalId: proposed.id, baseHash: proposed.baseHash, opId: "rpc-smoke" }) as { state: string };
     assert.equal(applied.state, "applied");
@@ -225,7 +236,7 @@ test("a registered ad hoc RPC apply launches the configured Goldfish engine, nev
     assert.equal(run.provider, baseUrl);
     assert.equal(run.state, "completed");
     assert.ok(chats.length >= 1, "the stub endpoint served the review");
-    assert.deepEqual(threadCalls, [], "no BB worker thread was consulted");
+    assert.deepEqual(threadCalls, ["thread-a"], "only the invoking thread's checkout was consulted; no worker was launched");
   } finally {
     db.close();
     await fs.rm(root, { recursive: true, force: true });

@@ -11,6 +11,7 @@ import path from "node:path";
 import {
   UNRESOLVED_FINDING_STATES,
   type DecisionKind,
+  type Checkout,
   type Finding,
   type LensId,
   type PresetId,
@@ -27,7 +28,7 @@ import { unifiedDiff } from "./diff.ts";
 import { ENDPOINT_CHANGED, normalizeBaseUrl } from "./goldfish.ts";
 import type { GoldfishClient, GoldfishMessage, GoldfishResult } from "./goldfish.ts";
 import { parseFindings, presetStages, stageMessages, type ContextFile } from "./prompts.ts";
-import { newId, type SpecRecord, type Store } from "./store.ts";
+import { checkoutKey, newId, type SpecRecord, type Store } from "./store.ts";
 import {
   compareAndReplace,
   planApply,
@@ -57,8 +58,8 @@ export type EngineDeps = {
   currentReviewer?(threadId: string | null): Promise<ReviewerSnapshot>;
   /** Project that owns a BB thread, or null when it no longer exists. */
   threadProject(threadId: string): Promise<string | null>;
-  /** Absolute workspace root of a project on this BB server, or null. */
-  projectRoot(projectId: string): Promise<string | null>;
+  /** Validate the persisted checkout before every filesystem operation. */
+  checkoutRoot(projectId: string, checkout: Checkout): Promise<string>;
   /** Tell open views something changed. */
   changed(projectId: string, specId: string | null): void;
   log: { info(msg: string): void; warn(msg: string): void };
@@ -113,12 +114,9 @@ export class Engine {
     }
   }
 
-  private async root(projectId: string): Promise<string> {
-    const root = await this.deps.projectRoot(projectId);
-    if (root === null) {
-      throw new EngineError("This project has no checkout on the BB server's machine; the spec workspace needs local files.");
-    }
-    return root;
+  private async root(spec: SpecRecord): Promise<string> {
+    if (!spec.checkout) throw new EngineError("This spec needs an explicit checkout assignment before file operations. Choose its original checkout in the Spec workspace.");
+    return this.deps.checkoutRoot(spec.projectId, spec.checkout);
   }
 
   private event(spec: SpecRecord, runId: string | null, kind: string, message: string): void {
@@ -127,17 +125,19 @@ export class Engine {
 
   // --- specs -------------------------------------------------------------
 
-  async registerSpec(projectId: string, relative: string): Promise<SpecRecord> {
-    const root = await this.root(projectId);
+  async registerSpec(projectId: string, relative: string, checkout: Checkout): Promise<SpecRecord> {
+    const root = await this.deps.checkoutRoot(projectId, checkout);
     const normalized = path.posix.normalize(relative.replaceAll("\\", "/"));
     if (!normalized.toLowerCase().endsWith(".md")) throw new EngineError("A spec must be a Markdown (.md) file.");
     const file = await readInside(root, normalized);
     if ("missing" in file) throw new EngineError(`No such file in the project: ${normalized}`);
-    const existing = this.deps.store.findSpecByPath(projectId, normalized);
+    const existing = this.deps.store.findSpecByPath(projectId, normalized, checkout);
     if (existing) return existing;
+    if (this.deps.store.findSpecByPath(projectId, normalized)) throw new EngineError("An older registration of this path needs an explicit checkout assignment first. Open it in the Spec workspace.");
     const spec: SpecRecord = {
       id: newId(),
       projectId,
+      checkout,
       path: normalized,
       title: titleOf(file.content, path.posix.basename(normalized)),
       createdAt: Date.now(),
@@ -146,6 +146,38 @@ export class Engine {
     this.event(spec, null, "registered", `Registered ${normalized}`);
     this.deps.changed(projectId, spec.id);
     return spec;
+  }
+
+  async bindCheckout(specId: string, checkout: Checkout): Promise<SpecRecord> {
+    return this.withLock(specId, async () => {
+      const { store } = this.deps;
+      const spec = store.getSpec(specId);
+      if (!spec) throw new EngineError("Unknown spec.");
+      if (spec.checkout) throw new EngineError("This spec is already bound to a checkout and cannot be moved.");
+      if (this.pendingProposals(specId).length || store.listRuns(specId).some(run => run.state === "running")) {
+        throw new EngineError("Finish the active review or reconcile its unfinished apply before assigning a checkout.");
+      }
+      const root = await this.deps.checkoutRoot(spec.projectId, checkout);
+      const file = await readInside(root, spec.path);
+      if ("missing" in file) throw new EngineError(`The spec file is missing: ${spec.path}`);
+      if (store.findSpecByPath(spec.projectId, spec.path, checkout)) throw new EngineError("This path is already registered in that checkout.");
+      store.transaction(() => {
+        store.bindCheckout(spec.id, checkout);
+        // Old proposals contain no checkout provenance. Preserve their diff,
+        // but release their findings so the Elephant can prepare a new proposal.
+        for (const proposal of store.listProposals(spec.id)) {
+          if (!proposal.checkoutKey) store.setProposalState(proposal.id, ["proposed"], "stale", "Checkout provenance is missing; create a new proposal in the assigned checkout.");
+        }
+        for (const run of store.listRuns(spec.id)) {
+          store.setRunState(run.id, ["awaiting_decisions", "completed"], "stale", "Checkout assigned after migration; start a fresh review.", true);
+        }
+        store.deleteOtherPendingAdHocReviewTasks(spec.id, "");
+        this.releaseStaleFindings(spec.id);
+      });
+      this.event(spec, null, "checkout.bound", `Explicitly assigned ${checkout.root} (${checkout.hostId})`);
+      this.deps.changed(spec.projectId, spec.id);
+      return store.getSpec(spec.id)!;
+    });
   }
 
   private pendingProposals(specId: string): Proposal[] {
@@ -176,23 +208,22 @@ export class Engine {
     const { store } = this.deps;
     let content: string | null = null;
     let hash: string | null = null;
-    const root = await this.deps.projectRoot(spec.projectId);
-    if (root !== null) {
-      try {
-        const file = await readInside(root, spec.path);
-        if (!("missing" in file)) {
-          content = file.content;
-          hash = file.hash;
-        }
-      } catch (cause) {
-        if (!(cause instanceof WorkspaceError)) throw cause;
+    let workspaceError: string | null = null;
+    try {
+      const root = await this.root(spec);
+      const file = await readInside(root, spec.path);
+      if (!("missing" in file)) {
+        content = file.content;
+        hash = file.hash;
       }
+    } catch (cause) {
+      workspaceError = cause instanceof Error ? cause.message : String(cause);
     }
     if (content !== null) {
       const title = titleOf(content, spec.title);
       if (title !== spec.title) store.updateSpecTitle(spec.id, title);
     }
-    store.transaction(() => {
+    if (!workspaceError) store.transaction(() => {
       store.staleProposals(spec.id, hash);
       this.releaseStaleFindings(spec.id);
     });
@@ -204,6 +235,8 @@ export class Engine {
         projectId: spec.projectId,
         path: spec.path,
         title: content !== null ? titleOf(content, spec.title) : spec.title,
+        checkout: spec.checkout ?? null,
+        workspaceError,
         currentHash: hash,
         exists: content !== null,
         latestRun: latest
@@ -271,7 +304,7 @@ export class Engine {
       }
       const active = store.listRuns(spec.id).find((r) => r.state === "running");
       if (active) throw new EngineError("A review of this spec is already running. Cancel it or wait for it to finish.");
-      const root = await this.root(spec.projectId);
+      const root = await this.root(spec);
       const file = await readInside(root, spec.path);
       if ("missing" in file) throw new EngineError(`The spec file is missing: ${spec.path}`);
       if (adHocProposalId) {
@@ -297,7 +330,7 @@ export class Engine {
       const runId = newId();
       const stem = spec.path.replace(/\.md$/i, "").replaceAll("/", "__");
       const engine = options.reviewer?.engine ?? this.deps.reviewer?.().engine ?? this.deps.goldfish.engine;
-      if (engine === "bb" && options.threadId && await this.deps.threadProject(options.threadId) !== spec.projectId) {
+      if (engine === "bb" && options.threadId && !parentRunId && !adHocProposalId && await this.deps.threadProject(options.threadId) !== spec.projectId) {
         throw new EngineError("thread no longer belongs to this project");
       }
       const reviewer = engine === "bb" ? this.deps.reviewer?.() : this.deps.goldfish;
@@ -325,7 +358,7 @@ export class Engine {
         stale: false,
         context: options.context,
         threadId: options.threadId,
-        environmentId: options.reviewer?.environmentId ?? null,
+        environmentId: spec.checkout!.environmentId,
         engine,
         provider: options.reviewer?.provider ?? null,
         model: options.reviewer?.model ?? reviewerStatus.model,
@@ -360,6 +393,11 @@ export class Engine {
       const execution = this.execute(spec, run, controller.signal)
         .catch((cause: unknown) => {
           this.deps.log.warn(`run ${runId} crashed: ${String(cause)}`);
+          for (const stage of store.listStages(runId)) {
+            if (stage.state === "running" || stage.state === "pending") {
+              store.updateStage(stage.id, { state: "failed", error: String(cause), finishedAt: Date.now() });
+            }
+          }
           store.setRunState(runId, ["running"], "failed", `internal error: ${String(cause)}`, true);
           this.event(spec, runId, "run.failed", `Internal error: ${String(cause)}`);
         })
@@ -419,7 +457,7 @@ export class Engine {
     const { store } = this.deps;
     const reviewer = run.engine === "bb" ? this.deps.reviewer?.() : this.deps.goldfish;
     if (!reviewer) throw new EngineError(`No ${run.engine} reviewer is available for this run.`);
-    const root = await this.root(spec.projectId);
+    const root = await this.root(spec);
     const context = await this.readContext(root, run.context);
     for (const note of context.notes) this.event(spec, run.id, "context", note);
     const stages = store.listStages(run.id);
@@ -435,6 +473,7 @@ export class Engine {
         return;
       }
       // Re-read the target before every stage: an edit mid-run makes the run stale, not wrong.
+      await this.root(spec);
       const file = await readInside(root, spec.path);
       if ("missing" in file || file.hash !== run.targetHash) {
         failure = { state: "stale", reason: "the document changed during the review; the remaining stages did not run" };
@@ -479,6 +518,7 @@ export class Engine {
         return;
       }
       reports.push({ lens: stage.lens, text: result.text });
+      await this.root(spec);
       const reportPath = `${run.reportDir}/round-${run.round}/${String(stage.position + 1).padStart(2, "0")}-${stage.lens}.md`;
       const header = [
         `# ${run.engine === "bb" ? "BB worker" : "Advanced endpoint"} report: ${stage.lens}`,
@@ -521,8 +561,16 @@ export class Engine {
       this.deps.changed(spec.projectId, spec.id);
     };
 
-    if (parallel) await Promise.all(stages.map(runStage));
-    else for (const stage of stages) await runStage(stage);
+    const executeStage = async (stage: (typeof stages)[number]): Promise<void> => {
+      try { await runStage(stage); }
+      catch (cause) {
+        const reason = cause instanceof Error ? cause.message : String(cause);
+        store.updateStage(stage.id, { state: "failed", error: reason, finishedAt: Date.now() });
+        failure ??= { state: "failed", reason: `${stage.lens} stage: ${reason}` };
+      }
+    };
+    if (parallel) await Promise.all(stages.map(executeStage));
+    else for (const stage of stages) await executeStage(stage);
     if (!failure && !signal.aborted) {
       const finalFile = await readInside(root, spec.path);
       if ("missing" in finalFile || finalFile.hash !== run.targetHash) {
@@ -549,7 +597,7 @@ export class Engine {
 
   /** The round's resolution record, rewritten whenever it changes. */
   private async writeSummary(spec: SpecRecord, run: Run): Promise<void> {
-    const root = await this.deps.projectRoot(spec.projectId);
+    const root = await this.root(spec).catch(() => null);
     if (root === null) return;
     const { store } = this.deps;
     const findings = store.listFindingsForRun(run.id);
@@ -664,7 +712,7 @@ export class Engine {
       if (!findingIds.length && store.listRuns(spec.id).some((run) => run.state === "running")) {
         throw new EngineError("Wait until the review finishes before proposing an ad hoc change.");
       }
-      const root = await this.root(spec.projectId);
+      const root = await this.root(spec);
       const file = await readInside(root, spec.path);
       if ("missing" in file) throw new EngineError(`The spec file is missing: ${spec.path}`);
       if (file.content === newContent) throw new EngineError("The proposed content is identical to the current document.");
@@ -690,6 +738,7 @@ export class Engine {
         diff: unifiedDiff(spec.path, file.content, newContent),
         summary: summary.slice(0, 2000),
         author,
+        checkoutKey: checkoutKey(spec.checkout!),
         state: "proposed",
         stateReason: null,
         appliedAt: null,
@@ -756,13 +805,14 @@ export class Engine {
         throw new EngineError("A proposal has an unfinished apply; restart reconciliation is required.");
       }
       const spec = store.getSpec(proposal.specId)!;
-      const root = await this.root(spec.projectId);
+      const root = await this.root(spec);
+      if (proposal.checkoutKey !== checkoutKey(spec.checkout!)) throw new EngineError("This proposal has no matching checkout provenance. Create a new proposal in this checkout.");
       const target = await resolveInside(root, spec.path);
       const plan = planApply(target, proposal.id);
       // Resolve the configured reviewer before any mutation so the automatic
       // review cannot silently fall back to another engine later.
       const reviewerSnapshot = !proposal.runId && !store.listRuns(proposal.specId).length
-        ? await this.deps.currentReviewer?.(proposal.author ?? null)
+        ? await this.deps.currentReviewer?.(null)
         : undefined;
       const outcome = await compareAndReplace(plan, proposal.baseHash, proposal.resultContent, () => {
         store.putApplyIntent({ proposalId, ...plan, baseHash: proposal.baseHash, resultHash: proposal.resultHash, createdAt: Date.now(), operationId: opId, reviewer: reviewerSnapshot ?? null });
@@ -811,7 +861,7 @@ export class Engine {
   /** Best-effort snapshot for legacy intents; failures keep evidence, not a crash. */
   private async resolveLegacyReviewer(proposal: Proposal): Promise<ReviewerSnapshot | undefined> {
     try {
-      return await this.deps.currentReviewer?.(proposal.author ?? null);
+      return await this.deps.currentReviewer?.(null);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       const spec = this.deps.store.getSpec(proposal.specId);
@@ -836,7 +886,7 @@ export class Engine {
     const { store } = this.deps;
     const tasks = store.listPendingAdHocReviewTasks().filter((task) => store.getProposal(task.proposalId)?.specId === spec.id);
     if (!tasks.length) return null;
-    const file = await readInside(await this.root(spec.projectId), spec.path);
+    const file = await readInside(await this.root(spec), spec.path);
     if ("missing" in file) return null;
     const task = tasks.findLast((candidate) => candidate.targetHash === file.hash) ?? null;
     if (task) store.deleteOtherPendingAdHocReviewTasks(spec.id, task.proposalId);
@@ -851,6 +901,7 @@ export class Engine {
     const { store } = this.deps;
     const run = store.getRun(runId);
     if (!run) return;
+    if (run.state === "stale") return;
     await this.writeSummary(spec, run);
     const findings = store.listFindingsForRun(runId);
     if (findings.some((f) => UNRESOLVED_FINDING_STATES.includes(f.state))) return;
@@ -931,6 +982,16 @@ export class Engine {
         store.addEvent(null, null, "proposal.reconciliation_failed", `Unfinished apply ${intent.proposalId} has no proposal; the intent and workspace files were retained for manual recovery.`);
         continue;
       }
+      const spec = store.getSpec(proposal.specId);
+      if (spec?.checkout) {
+        try {
+          const root = await this.root(spec);
+          if (await resolveInside(root, spec.path) !== intent.targetPath) throw new EngineError("Apply intent target differs from the bound checkout.");
+        } catch (cause) {
+          this.deps.log.warn(`Apply ${proposal.id} remains pending: ${String(cause)}`);
+          continue;
+        }
+      }
       const result = await reconcileApply(
         { targetPath: intent.targetPath, backupPath: intent.backupPath, stagedPath: intent.stagedPath },
         intent.baseHash,
@@ -985,9 +1046,11 @@ export class Engine {
     }
     for (const run of store.listRunsByState(["awaiting_decisions", "completed"])) {
       const spec = store.getSpec(run.specId);
-      if (!spec) continue;
+      if (!spec?.checkout) continue;
       if (run.state === "awaiting_decisions") {
-        await this.withLock(spec.id, () => this.afterResolution(spec, run.id));
+        await this.withLock(spec.id, () => this.afterResolution(spec, run.id)).catch(cause => {
+          this.event(spec, run.id, "review.unavailable", `Cannot resume in the bound checkout: ${String(cause)}`);
+        });
       } else if (run.stateReason === `continued in round ${run.round + 1}` &&
         !store.listRuns(spec.id).some((child) => child.parentRunId === run.id)) {
         this.scheduleContinuation(spec, run);
@@ -996,11 +1059,11 @@ export class Engine {
     const pendingSpecs = new Set(store.listPendingAdHocReviewTasks().map((task) => store.getProposal(task.proposalId)?.specId).filter((id): id is string => !!id));
     for (const specId of pendingSpecs) {
       const spec = store.getSpec(specId);
-      if (!spec) continue;
+      if (!spec?.checkout) continue;
       await this.withLock(spec.id, async () => {
         const task = await this.currentPendingAdHocReview(spec);
         if (task) this.scheduleAdHocReview(spec, task.proposalId);
-      });
+      }).catch(cause => this.event(spec, null, "review.unavailable", `Cannot resume in the bound checkout: ${String(cause)}`));
     }
   }
 

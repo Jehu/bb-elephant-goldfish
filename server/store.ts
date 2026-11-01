@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type {
   DecisionKind,
+  Checkout,
   EventRow,
   Finding,
   FindingState,
@@ -20,7 +21,7 @@ import type {
   Stage,
   StandardId,
 } from "./contract.ts";
-import { reviewerSnapshotSchema } from "./contract.ts";
+import { checkoutSchema, reviewerSnapshotSchema } from "./contract.ts";
 
 // Append-only. Never edit or reorder shipped statements.
 export const MIGRATIONS: string[] = [
@@ -148,11 +149,24 @@ export const MIGRATIONS: string[] = [
    CREATE TABLE reviewer_consent (scope TEXT PRIMARY KEY, granted_at INTEGER NOT NULL);`,
   `ALTER TABLE runs ADD COLUMN environment_id TEXT;`,
   `ALTER TABLE apply_intents ADD COLUMN reviewer_json TEXT;`,
+  // FK enforcement is disabled outside migrate's transaction while replacing
+  // the parent table. IDs and dependent rows remain unchanged.
+  `CREATE TABLE specs_with_checkouts (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, path TEXT NOT NULL,
+    title TEXT NOT NULL, created_at INTEGER NOT NULL,
+    checkout_key TEXT NOT NULL DEFAULT '', checkout_json TEXT,
+    UNIQUE (project_id, checkout_key, path)
+  );
+  INSERT INTO specs_with_checkouts (id, project_id, path, title, created_at)
+    SELECT id, project_id, path, title, created_at FROM specs;
+  DROP TABLE specs;
+  ALTER TABLE specs_with_checkouts RENAME TO specs;`,
+  `ALTER TABLE proposals ADD COLUMN checkout_key TEXT;`,
 ];
 
 export const newId = (): string => randomUUID().replace(/-/g, "").slice(0, 24);
 
-type SpecRow = { id: string; project_id: string; path: string; title: string; created_at: number };
+type SpecRow = { id: string; project_id: string; path: string; title: string; created_at: number; checkout_json: string | null };
 type RunRow = {
   id: string;
   spec_id: string;
@@ -215,6 +229,7 @@ type FindingRow = {
   created_at: number;
 };
 type ProposalRow = {
+  checkout_key: string | null;
   id: string;
   spec_id: string;
   run_id: string | null;
@@ -288,7 +303,13 @@ const adHocReviewTaskFromRow = (r: AdHocReviewTaskRow): AdHocReviewTask => {
 };
 
 /** A spec row without the live file facts the RPC layer adds. */
-export type SpecRecord = { id: string; projectId: string; path: string; title: string; createdAt: number };
+export type SpecRecord = { id: string; projectId: string; path: string; title: string; createdAt: number; checkout?: Checkout | null };
+
+export const checkoutKey = (checkout: Checkout): string => JSON.stringify([checkout.hostId, checkout.root]);
+const specFromRow = (r: SpecRow): SpecRecord => ({
+  id: r.id, projectId: r.project_id, path: r.path, title: r.title, createdAt: r.created_at,
+  checkout: r.checkout_json ? checkoutSchema.parse(JSON.parse(r.checkout_json)) : null,
+});
 
 const runFromRow = (r: RunRow): Run => ({
   id: r.id,
@@ -359,6 +380,7 @@ const findingFromRow = (r: FindingRow): Finding => ({
 });
 
 const proposalFromRow = (r: ProposalRow): Proposal => ({
+  checkoutKey: r.checkout_key,
   id: r.id,
   specId: r.spec_id,
   runId: r.run_id,
@@ -392,25 +414,30 @@ export class Store {
     const rows = this.db
       .prepare<[string], SpecRow>("SELECT * FROM specs WHERE project_id = ? ORDER BY path")
       .all(projectId);
-    return rows.map((r) => ({ id: r.id, projectId: r.project_id, path: r.path, title: r.title, createdAt: r.created_at }));
+    return rows.map(specFromRow);
   }
 
   getSpec(specId: string): SpecRecord | null {
     const r = this.db.prepare<[string], SpecRow>("SELECT * FROM specs WHERE id = ?").get(specId);
-    return r ? { id: r.id, projectId: r.project_id, path: r.path, title: r.title, createdAt: r.created_at } : null;
+    return r ? specFromRow(r) : null;
   }
 
-  findSpecByPath(projectId: string, path: string): SpecRecord | null {
+  findSpecByPath(projectId: string, path: string, checkout?: Checkout): SpecRecord | null {
     const r = this.db
-      .prepare<[string, string], SpecRow>("SELECT * FROM specs WHERE project_id = ? AND path = ?")
-      .get(projectId, path);
-    return r ? { id: r.id, projectId: r.project_id, path: r.path, title: r.title, createdAt: r.created_at } : null;
+      .prepare<[string, string, string], SpecRow>("SELECT * FROM specs WHERE project_id = ? AND path = ? AND checkout_key = ?")
+      .get(projectId, path, checkout ? checkoutKey(checkout) : "");
+    return r ? specFromRow(r) : null;
   }
 
   insertSpec(spec: SpecRecord): void {
     this.db
-      .prepare("INSERT INTO specs (id, project_id, path, title, created_at) VALUES (?, ?, ?, ?, ?)")
-      .run(spec.id, spec.projectId, spec.path, spec.title, spec.createdAt);
+      .prepare("INSERT INTO specs (id, project_id, path, title, created_at, checkout_key, checkout_json) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(spec.id, spec.projectId, spec.path, spec.title, spec.createdAt, spec.checkout ? checkoutKey(spec.checkout) : "", spec.checkout ? JSON.stringify(spec.checkout) : null);
+  }
+
+  bindCheckout(specId: string, checkout: Checkout): void {
+    this.db.prepare("UPDATE specs SET checkout_key = ?, checkout_json = ? WHERE id = ? AND checkout_json IS NULL")
+      .run(checkoutKey(checkout), JSON.stringify(checkout), specId);
   }
 
   updateSpecTitle(specId: string, title: string): void {
@@ -612,8 +639,8 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO proposals (id, spec_id, run_id, finding_ids_json, base_hash, result_hash, result_content, diff, summary,
-          author, state, state_reason, applied_at, backup_path, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          author, state, state_reason, applied_at, backup_path, created_at, checkout_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         p.id,
@@ -631,6 +658,7 @@ export class Store {
         p.appliedAt,
         p.backupPath,
         p.createdAt,
+        p.checkoutKey ?? null,
       );
   }
 

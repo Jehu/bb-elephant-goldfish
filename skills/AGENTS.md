@@ -18,6 +18,10 @@ Seven agent skills adapting the pinned Elephant-Goldfish Model to BB.
 - Resolve runtime references relative to the registered skill directory, not
   the user's working directory or the repository's upstream tree.
 - Reviewed specs change only through an `egm_propose` diff the human confirms.
+- Registration and `egm_specs` use the invoking thread's checkout. Read the
+  returned checkout before accessing a document; never substitute the main
+  checkout or another worktree for an existing spec ID. Reviews and confirmed
+  proposals remain bound to the registered checkout.
 - Drift is bounded analysis, not an AST equivalence guarantee.
 - Bootstrap is documentation-only, respects ignores and symlinks, and asks
   before expanding beyond 15 discovered directories.

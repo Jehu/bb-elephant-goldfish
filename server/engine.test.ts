@@ -72,11 +72,11 @@ async function setup(replies: Reply[], options: { configured?: boolean; bb?: () 
     reviewer: options.bb,
     ...(options.currentReviewer === null ? {} : { currentReviewer: options.currentReviewer ?? (async () => ({ engine: "goldfish" as const, provider: "http://fake/v1", model: "m", environmentId: null })) }),
     threadProject: options.threadProject ?? (async () => "proj"),
-    projectRoot: async () => root,
+    checkoutRoot: async () => root,
     changed: () => {},
     log: { info: () => {}, warn: () => {} },
   });
-  const spec = await engine.registerSpec("proj", "docs/spec.md");
+  const spec = await engine.registerSpec("proj", "docs/spec.md", { hostId: "host", root, environmentId: "env" });
   /** Start a review and wait for it, and any round it starts, to finish. */
   const review = async (preset: "implementation" | "feature_spec", extra: { maxRounds?: number; context?: string[] } = {}) => {
     const run = await engine.startRun(spec.id, {
@@ -505,7 +505,7 @@ test("restart reconciliation marks interrupted runs failed and keeps partial res
     store: new Store(db),
     goldfish: new GoldfishClient(async () => null),
     threadProject: async () => "proj",
-    projectRoot: async () => root,
+    checkoutRoot: async () => root,
     changed: () => {},
     log: { info: () => {}, warn: () => {} },
   });
@@ -934,7 +934,7 @@ test("revoking BB consent blocks restart reconciliation continuations", async ()
   assert.equal(bb.launches.length, 1);
 });
 
-test("a continuation whose BB thread moved projects fails without another worker", async () => {
+test("an automatic continuation retains its checkout after the origin thread moves projects", async () => {
   let threadProject = "proj";
   const bb = fakeBb([FINDING("Gap A")]);
   const { engine, spec, store } = await setup([], { bb: bb.reviewer, threadProject: async () => threadProject });
@@ -946,11 +946,13 @@ test("a continuation whose BB thread moved projects fails without another worker
   const proposal = await engine.propose(spec.id, [finding!.id], "# Spec\n\nSecond version.\n", "fix", "thread-a");
   await engine.applyProposal(proposal.id, proposal.baseHash, "thread-moved");
   await engine.settle();
-  const failed = store.getRun(run.id)!;
-  assert.equal(failed.state, "failed");
-  assert.match(failed.stateReason ?? "", /thread no longer belongs to this project/);
-  assert.equal(store.listRuns(spec.id).filter((child) => child.parentRunId === run.id).length, 0);
-  assert.equal(bb.launches.length, 1);
+  const parent = store.getRun(run.id)!;
+  assert.equal(parent.state, "completed");
+  assert.match(parent.stateReason ?? "", /continued in round 2/);
+  const child = store.listRuns(spec.id).find(child => child.parentRunId === run.id)!;
+  assert.equal(child.projectId, "proj");
+  assert.equal(child.environmentId, "env");
+  assert.equal(bb.launches.length, 2);
 });
 
 test("a pinned provider that differs from the live endpoint is never contacted", async () => {
@@ -1071,7 +1073,7 @@ test("a first-ever ad hoc apply pins the configured goldfish reviewer", async ()
   const proposal = await engine.propose(spec.id, [], content, "change", "author-thread");
   await engine.applyProposal(proposal.id, proposal.baseHash, "ad-hoc-pin");
   await engine.settle();
-  assert.deepEqual(calls, ["author-thread"]);
+  assert.deepEqual(calls, [null]); // reviewer settings must not follow a moved author thread
   const task = store.getAdHocReviewTask(proposal.id)!;
   assert.deepEqual(task.options.reviewer, { engine: "goldfish", provider: "http://fake/v1", model: "pinned-model", environmentId: null });
   const run = store.listRuns(spec.id)[0]!;
@@ -1166,7 +1168,7 @@ test("a legacy intent without a reviewer snapshot resolves one at reconciliation
   await fs.writeFile(target, content);
   await engine.reconcile();
   await engine.settle();
-  assert.deepEqual(calls, ["legacy-thread"]);
+  assert.deepEqual(calls, [null]);
   const run = store.listRuns(spec.id)[0]!;
   assert.equal(run.engine, "goldfish");
   assert.equal(run.model, "legacy-model");

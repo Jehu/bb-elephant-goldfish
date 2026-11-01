@@ -94,11 +94,20 @@ const projectId = z.string().min(1).max(128);
 const id = z.string().min(1).max(64);
 const relPath = z.string().min(1).max(1024);
 
+export const checkoutSchema = z.object({
+  hostId: z.string().min(1),
+  root: z.string().min(1),
+  environmentId: z.string().min(1),
+});
+export type Checkout = z.infer<typeof checkoutSchema>;
+
 export const specSchema = z.object({
   id,
   projectId,
   path: relPath,
   title: z.string(),
+  checkout: checkoutSchema.nullable(),
+  workspaceError: z.string().nullable(),
   /** sha256 of the file as it is on disk right now, or null when missing. */
   currentHash: z.string().nullable(),
   exists: z.boolean(),
@@ -194,6 +203,8 @@ export const proposalSchema = z.object({
   summary: z.string(),
   /** Who authored it: an agent thread id, or "human". */
   author: z.string(),
+  /** Absent on proposals written before checkout binding. */
+  checkoutKey: z.string().nullable().optional(),
   state: z.enum(PROPOSAL_STATES),
   stateReason: z.string().nullable(),
   appliedAt: z.number().nullable(),
@@ -216,7 +227,7 @@ export const runSchema = z.object({
   stale: z.boolean(),
   context: z.array(relPath),
   threadId: z.string().nullable(),
-  /** BB environment captured at launch; null for endpoint reviews. */
+  /** Checkout environment captured at launch, including endpoint reviews. */
   environmentId: z.string().nullable().optional(),
   engine: reviewerEngineSchema,
   provider: z.string().nullable(),
@@ -272,11 +283,19 @@ export const rpcContract = defineRpcContract({
     output: z.object({ granted: z.boolean(), warning: z.string() }),
   },
   specs_list: {
-    input: z.object({ projectId }),
+    input: z.object({ projectId, threadId: z.string().optional() }),
     output: z.object({ specs: z.array(specSchema), root: z.string().nullable() }),
   },
   specs_register: {
-    input: z.object({ projectId, path: relPath }),
+    input: z.object({ projectId, path: relPath, threadId: z.string().optional(), environmentId: z.string().optional() }),
+    output: specSchema,
+  },
+  checkouts_list: {
+    input: z.object({ projectId }),
+    output: z.object({ checkouts: z.array(checkoutSchema) }),
+  },
+  spec_bind_checkout: {
+    input: z.object({ specId: id, environmentId: z.string().min(1), confirmed: z.literal(true) }),
     output: specSchema,
   },
   specs_forget: {
@@ -299,6 +318,8 @@ export const rpcContract = defineRpcContract({
     input: z.object({ threadId: z.string() }),
     output: z.object({
       projectId: projectId.nullable(),
+      checkout: checkoutSchema.nullable(),
+      workspaceError: z.string().nullable(),
       specs: z.array(specSchema),
       activeRuns: z.array(runSchema),
     }),

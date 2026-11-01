@@ -16,9 +16,11 @@ import {
   useBbContext,
   useComposer,
   useRpc,
+  useSdk,
 } from "@get-bb/plugin-sdk/app";
 import type {
   DecisionKind,
+  Checkout,
   EventRow,
   Finding,
   FindingState,
@@ -301,8 +303,9 @@ function SpecRow({ spec, onOpen, onForget }: { spec: Spec; onOpen: () => void; o
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-medium">{spec.title}</div>
           <div className="truncate font-mono text-xs text-muted-foreground">{spec.path}</div>
+          <div className="truncate text-xs text-muted-foreground" title={spec.checkout?.root}>{spec.checkout ? spec.checkout.root : "Checkout assignment required"}</div>
         </div>
-        {!spec.exists && <Badge className="bg-red-500/15 text-red-600">File missing</Badge>}
+        {!spec.exists && <Badge className="bg-red-500/15 text-red-600" title={spec.workspaceError ?? undefined}>{spec.workspaceError ? "Checkout unavailable" : "File missing"}</Badge>}
         {run ? (
           <>
             <Badge className={RUN_TONE[run.state]} title={run.stateReason ?? undefined}>{run.state === "limit_reached" ? reviewLimitLabel(run.stateReason) : RUN_LABEL[run.state]}</Badge>
@@ -320,30 +323,75 @@ function SpecRow({ spec, onOpen, onForget }: { spec: Spec; onOpen: () => void; o
   );
 }
 
-function RegisterSpec({ projectId, onDone }: { projectId: string; onDone: (spec: Spec) => void }) {
+function CheckoutSelect({ projectId, value, onChange }: { projectId: string; value: string; onChange: (value: string) => void }) {
+  const rpc = useRpc<RpcContract>();
+  const [checkouts, setCheckouts] = useState<Checkout[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let current = true;
+    rpc.call("checkouts_list", { projectId }).then(
+      result => { if (current) { setCheckouts(result.checkouts); setError(null); } },
+      cause => { if (current) setError(errorText(cause)); },
+    );
+    return () => { current = false; };
+  }, [rpc, projectId]);
+  return <div className="space-y-1">
+    <label className="flex flex-col gap-1 text-xs">Checkout
+      <select className="w-full min-w-0 rounded-md border bg-background p-2 text-sm" value={value} onChange={event => onChange(event.target.value)} disabled={!checkouts?.length}>
+        <option value="">{checkouts === null ? "Loading checkouts…" : checkouts.length ? "Choose a checkout…" : "No available local checkouts"}</option>
+        {checkouts?.map(checkout => <option key={checkout.environmentId} value={checkout.environmentId}>{checkout.root}</option>)}
+      </select>
+    </label>
+    <ErrorLine error={error} />
+  </div>;
+}
+
+function AssignCheckout({ spec, onDone }: { spec: Spec; onDone: () => void }) {
+  const rpc = useRpc<RpcContract>();
+  const [environmentId, setEnvironmentId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return <div className="space-y-3 rounded-md border p-3">
+    <p className="text-sm">Choose the original checkout for this existing spec. Its review history stays with that checkout. Earlier unapplied proposals must be recreated.</p>
+    <CheckoutSelect projectId={spec.projectId} value={environmentId} onChange={setEnvironmentId} />
+    <Button size="sm" disabled={!environmentId || busy} onClick={async () => {
+      setBusy(true); setError(null);
+      try { await rpc.call("spec_bind_checkout", { specId: spec.id, environmentId, confirmed: true }); onDone(); }
+      catch (cause) { setError(errorText(cause)); }
+      finally { setBusy(false); }
+    }}>{busy ? "Assigning…" : "Confirm original checkout"}</Button>
+    <ErrorLine error={error} />
+  </div>;
+}
+
+function RegisterSpec({ projectId, threadId, onDone }: { projectId: string; threadId: string | null; onDone: (spec: Spec) => void }) {
   const rpc = useRpc<RpcContract>();
   const [path, setPath] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [environmentId, setEnvironmentId] = useState("");
+  const [busy, setBusy] = useState(false);
   return (
     <form
       className="space-y-1"
       onSubmit={(event) => {
         event.preventDefault();
-        if (!path.trim()) return;
-        rpc.call("specs_register", { projectId, path: path.trim() }).then(
+        if (!path.trim() || busy || (!threadId && !environmentId)) return;
+        setBusy(true);
+        rpc.call("specs_register", { projectId, path: path.trim(), ...(threadId ? { threadId } : { environmentId }) }).then(
           (spec) => {
             setPath("");
             setError(null);
             onDone(spec);
           },
           (cause) => setError(errorText(cause)),
-        );
+        ).finally(() => setBusy(false));
       }}
     >
+      {!threadId && <CheckoutSelect projectId={projectId} value={environmentId} onChange={setEnvironmentId} />}
       <div className="flex gap-2">
         <Input value={path} onChange={(e) => setPath(e.target.value)} placeholder="docs/designs/feature.md" aria-label="Spec path" />
-        <Button type="submit" variant="outline" disabled={!path.trim()}>
-          Add spec
+        <Button type="submit" variant="outline" disabled={!path.trim() || busy || (!threadId && !environmentId)}>
+          {busy ? "Adding…" : "Add spec"}
         </Button>
       </div>
       <ErrorLine error={error} />
@@ -351,7 +399,7 @@ function RegisterSpec({ projectId, onDone }: { projectId: string; onDone: (spec:
   );
 }
 
-function SpecList({ projectId, onOpen }: { projectId: string; onOpen: (specId: string) => void }) {
+function SpecList({ projectId, threadId, onOpen }: { projectId: string; threadId: string | null; onOpen: (specId: string) => void }) {
   const rpc = useRpc<RpcContract>();
   const [specs, setSpecs] = useState<Spec[] | null>(null);
   const [root, setRoot] = useState<string | null>(null);
@@ -359,17 +407,20 @@ function SpecList({ projectId, onOpen }: { projectId: string; onOpen: (specId: s
   const [forgetting, setForgetting] = useState<Spec | null>(null);
   const [forgetError, setForgetError] = useState<string | null>(null);
   const [forgetBusy, setForgetBusy] = useState(false);
+  const request = useRef(0);
   const load = useCallback(() => {
-    rpc.call("specs_list", { projectId }).then(
+    const generation = ++request.current;
+    rpc.call("specs_list", { projectId, ...(threadId ? { threadId } : {}) }).then(
       (result) => {
+        if (generation !== request.current) return;
         setSpecs(result.specs);
         setRoot(result.root);
         setError(null);
       },
-      (cause) => setError(errorText(cause)),
+      (cause) => { if (generation === request.current) setError(errorText(cause)); },
     );
-  }, [rpc, projectId]);
-  useEffect(load, [load]);
+  }, [rpc, projectId, threadId]);
+  useEffect(() => { load(); return () => { request.current++; }; }, [load]);
   useRealtime(CHANGED, (payload) => {
     if (payload && typeof payload === "object" && "projectId" in payload && payload.projectId === projectId) load();
   });
@@ -390,9 +441,7 @@ function SpecList({ projectId, onOpen }: { projectId: string; onOpen: (specId: s
   return (
     <div className="space-y-3">
       <ErrorLine error={error} />
-      {root === null && specs !== null && (
-        <p className="text-sm text-muted-foreground">This project has no checkout on this machine; specs cannot be read here.</p>
-      )}
+      {root && <p className="break-all text-xs text-muted-foreground">Checkout: {root}</p>}
       {specs === null ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : specs.length === 0 ? (
@@ -410,7 +459,7 @@ function SpecList({ projectId, onOpen }: { projectId: string; onOpen: (specId: s
           ))}
         </ul>
       )}
-      {root !== null && <RegisterSpec projectId={projectId} onDone={(spec) => onOpen(spec.id)} />}
+      <RegisterSpec projectId={projectId} threadId={threadId} onDone={(spec) => onOpen(spec.id)} />
       <Dialog open={forgetting !== null} onOpenChange={(open) => { if (!open && !forgetBusy) setForgetting(null); }}>
         <DialogContent hideCloseButton={forgetBusy}>
           <DialogHeader>
@@ -664,7 +713,7 @@ function FindingCard({ finding, running, onDecide, reveal }: { finding: Finding;
   );
 }
 
-function ProposalCard({ proposal, path, running, onApply, onReject, onReviewDiff, onRevise, revealDiff }: { proposal: Proposal; path: string; running: boolean; onApply: () => void; onReject: () => void; onReviewDiff?: () => void; onRevise?: (feedback: string) => void; revealDiff?: boolean }) {
+function ProposalCard({ proposal, path, running, applyUnavailable, onApply, onReject, onReviewDiff, onRevise, revealDiff }: { proposal: Proposal; path: string; running: boolean; applyUnavailable?: boolean; onApply: () => void; onReject: () => void; onReviewDiff?: () => void; onRevise?: (feedback: string) => void; revealDiff?: boolean }) {
   const [confirming, setConfirming] = useState(false);
   const [feedback, setFeedback] = useState("");
   const pending = proposal.state === "proposed";
@@ -704,7 +753,7 @@ function ProposalCard({ proposal, path, running, onApply, onReject, onReviewDiff
             <span className="text-sm">Write this change to {path}? The file must still be the version shown. Coordinate with other editors: concurrent writes are not locked and may be overwritten.</span>
             <Button
               size="sm"
-              disabled={running}
+              disabled={running || applyUnavailable}
               onClick={() => {
                 setConfirming(false);
                 onApply();
@@ -718,7 +767,7 @@ function ProposalCard({ proposal, path, running, onApply, onReject, onReviewDiff
           </div>
         ) : (
           <div className="flex gap-2">
-            <Button size="sm" disabled={running} onClick={() => setConfirming(true)}>
+            <Button size="sm" disabled={running || applyUnavailable} onClick={() => setConfirming(true)}>
               Review and apply…
             </Button>
             <Button size="sm" variant="ghost" disabled={running} onClick={onReject}>
@@ -741,7 +790,7 @@ function TargetItem({ active, children }: { active: boolean; children: ReactNode
   return <div ref={ref} tabIndex={active ? -1 : undefined} className={active ? "scroll-mt-4 rounded-md ring-2 ring-ring p-2" : undefined}>{children}</div>;
 }
 
-function SpecDetail({ specId, threadId, onBack, onDraft, target }: { specId: string; threadId: string | null; onBack: () => void; onDraft?: DraftRequest; target?: EgmTarget }) {
+function SpecDetail({ specId, threadId, threadCheckout, onBack, onDraft, target }: { specId: string; threadId: string | null; threadCheckout?: Checkout | null; onBack: () => void; onDraft?: DraftRequest; target?: EgmTarget }) {
   const rpc = useRpc<RpcContract>();
   const reviewer = useReviewer();
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -750,16 +799,19 @@ function SpecDetail({ specId, threadId, onBack, onDraft, target }: { specId: str
   const [showDoc, setShowDoc] = useState(Boolean(target && !target.findingId && !target.proposalId));
   const [showResolved, setShowResolved] = useState(false);
   const [selectedFindings, setSelectedFindings] = useState<string[]>([]);
+  const request = useRef(0);
   const load = useCallback(() => {
+    const generation = ++request.current;
     rpc.call("spec_detail", { specId }).then(
       (result) => {
+        if (generation !== request.current) return;
         setDetail(result);
         setError(null);
       },
-      (cause) => setError(errorText(cause)),
+      (cause) => { if (generation === request.current) setError(errorText(cause)); },
     );
   }, [rpc, specId]);
-  useEffect(load, [load]);
+  useEffect(() => { load(); return () => { request.current++; }; }, [load]);
   useRealtime(CHANGED, (payload) => {
     if (payload && typeof payload === "object" && "specId" in payload && (payload.specId === specId || payload.specId === null)) load();
   });
@@ -782,6 +834,7 @@ function SpecDetail({ specId, threadId, onBack, onDraft, target }: { specId: str
   if (error) return <ErrorLine error={error} />;
   if (!detail) return <p className="text-sm text-muted-foreground">Loading…</p>;
   const { spec } = detail;
+  const sameCheckout = Boolean(spec.checkout && threadCheckout && spec.checkout.hostId === threadCheckout.hostId && spec.checkout.root === threadCheckout.root);
   if (target && spec.projectId !== target.projectId) return <ErrorLine error="This document does not belong to the linked project." />;
   const targetMissing = target?.findingId ? !detail.findings.some((f) => f.id === target.findingId)
     : target?.proposalId ? !detail.proposals.some((p) => p.id === target.proposalId) : false;
@@ -796,7 +849,7 @@ function SpecDetail({ specId, threadId, onBack, onDraft, target }: { specId: str
   const eligibleFindings = detail.findings.filter((finding) => ["open", "fix_requested", "contested"].includes(finding.state) && detail.runs.some((run) => run.id === finding.runId && run.threadId === threadId && run.state !== "running"));
   const selectedRunId = eligibleFindings.find((finding) => selectedFindings.includes(finding.id))?.runId;
   const chosenFindings = eligibleFindings.filter((finding) => finding.runId === selectedRunId && selectedFindings.includes(finding.id));
-  const specContext = { specId: spec.id, path: spec.path, title: spec.title, currentHash: spec.currentHash };
+  const specContext = { specId: spec.id, path: spec.path, checkout: spec.checkout, title: spec.title, currentHash: spec.currentHash };
   const proposalContext = (proposal: Proposal) => ({ ...specContext, proposalId: proposal.id, runId: proposal.runId, findingIds: proposal.findingIds, state: proposal.state, summary: proposal.summary, baseHash: proposal.baseHash, diff: proposal.diff });
   const proposalInThread = (proposal: Proposal) => proposal.runId ? detail.runs.some((run) => run.id === proposal.runId && run.threadId === threadId) : threadId !== null && proposal.author === threadId;
 
@@ -813,9 +866,13 @@ function SpecDetail({ specId, threadId, onBack, onDraft, target }: { specId: str
         <p className="font-mono text-xs text-muted-foreground">
           {spec.path} · {spec.currentHash ? `current version ${spec.currentHash.slice(0, 10)}` : "file missing"}
         </p>
+        {spec.checkout && <p className="break-all text-xs text-muted-foreground">Checkout: {spec.checkout.root} · {spec.checkout.hostId}</p>}
         <ReviewerBanner status={reviewer} />
       </div>
       <ErrorLine error={actionError} />
+      <ErrorLine error={spec.workspaceError} />
+      {!spec.checkout && <AssignCheckout spec={spec} onDone={load} />}
+      {threadId && spec.checkout && !sameCheckout && <p className="text-sm text-muted-foreground">This document belongs to another checkout. Apply targets the checkout shown above. Open a thread there to draft changes or start a review.</p>}
       {targetMissing && <ErrorLine error="The linked item is no longer available. You are viewing its document." />}
       {onDraft && spec.exists && <div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => onDraft("The code has moved ahead of this document. Use the egm-drift-report skill to check this document against the implemented code, then use the egm-resolve skill to draft a targeted change proposal that aligns the document with the implementation for the drifted points only. The human reviews and confirms every proposal; do not directly edit the document, and do not start a new general review round.", specContext)}>Align document with code</Button><Button size="sm" variant="outline" onClick={() => onDraft("Use the Elephant drafting workflow to draft a spec from this concept document.", specContext)}>Draft from concept</Button><Button size="sm" variant="outline" onClick={() => onDraft("Propose a change to this document for human review; do not directly edit it.", specContext)}>Ask for change proposal</Button></div>}
       {!threadId && <p className="text-xs text-muted-foreground">To draft an Elephant request, open this spec in the relevant thread's Elephant Goldfish tab.</p>}
@@ -826,7 +883,8 @@ function SpecDetail({ specId, threadId, onBack, onDraft, target }: { specId: str
             <TargetItem key={p.id} active={p.id === target?.proposalId}><ProposalCard
               proposal={p}
               running={p.runId !== null && runningRuns.has(p.runId)}
-              path={spec.path}
+              applyUnavailable={Boolean(spec.workspaceError)}
+              path={spec.checkout ? `${spec.checkout.root}/${spec.path}` : spec.path}
               onApply={() => act(rpc.call("proposal_apply", { proposalId: p.id, baseHash: p.baseHash, opId: opId() }).then((result) => { if (onDraft && proposalInThread(p)) onDraft("The human just applied this proposed change to the document. Acknowledge that, then check the review status and continue the work from the applied state; do not edit the document directly.", { ...proposalContext(p), state: "applied" }); return result; }))}
               onReject={() => act(rpc.call("proposal_reject", { proposalId: p.id, reason: "" }))}
               onReviewDiff={onDraft && p.diff && proposalInThread(p) ? () => onDraft("Review the proposed diff and explain its implications; do not apply it.", proposalContext(p)) : undefined}
@@ -878,7 +936,7 @@ function SpecDetail({ specId, threadId, onBack, onDraft, target }: { specId: str
       </Section>
 
       <Section title="Review">
-        <StartReview spec={spec} threadId={threadId} reviewer={reviewer} />
+        {(!threadId || sameCheckout) && <StartReview spec={spec} threadId={threadId} reviewer={reviewer} />}
         {detail.runs.slice(0, 5).map((run) => (
           <RunCard key={run.id} run={run} stages={detail.stages} onCancel={() => act(rpc.call("review_cancel", { runId: run.id }))} />
         ))}
@@ -918,14 +976,14 @@ function SpecDetail({ specId, threadId, onBack, onDraft, target }: { specId: str
 
 // --- surfaces ----------------------------------------------------------------
 
-function Workspace({ projectId, threadId, onDraft, target }: { projectId: string; threadId: string | null; onDraft?: DraftRequest; target?: EgmTarget }) {
+function Workspace({ projectId, threadId, threadCheckout, onDraft, target }: { projectId: string; threadId: string | null; threadCheckout?: Checkout | null; onDraft?: DraftRequest; target?: EgmTarget }) {
   const [specId, setSpecId] = useState<string | null>(target?.specId ?? null);
   useEffect(() => setSpecId(target?.specId ?? null), [projectId, target?.specId, target?.findingId, target?.proposalId]);
   if (target && target.projectId !== projectId) return <ErrorLine error="This link belongs to another project. Open it from the matching project thread or use the full-page link." />;
   return specId ? (
-    <SpecDetail key={`${specId}:${target?.findingId ?? target?.proposalId ?? ""}`} specId={specId} threadId={threadId} onBack={() => setSpecId(null)} onDraft={onDraft} target={specId === target?.specId ? target : undefined} />
+    <SpecDetail key={`${specId}:${target?.findingId ?? target?.proposalId ?? ""}`} specId={specId} threadId={threadId} threadCheckout={threadCheckout} onBack={() => setSpecId(null)} onDraft={onDraft} target={specId === target?.specId ? target : undefined} />
   ) : (
-    <SpecList projectId={projectId} onOpen={setSpecId} />
+    <SpecList projectId={projectId} threadId={threadId} onOpen={setSpecId} />
   );
 }
 
@@ -987,12 +1045,13 @@ function ProjectOverview() {
           </select>
         </label>
       )}
-      {projectId && <Workspace projectId={projectId} threadId={null} />}
+      {projectId && <Workspace key={projectId} projectId={projectId} threadId={null} />}
     </div>
   );
 }
 
 function ThreadTab({ threadId, target }: { threadId: string; target?: EgmTarget }) {
+  const sdk = useSdk();
   const rpc = useRpc<RpcContract>();
   const navigate = useBbNavigate();
   const composer = useComposer();
@@ -1019,19 +1078,25 @@ function ThreadTab({ threadId, target }: { threadId: string; target?: EgmTarget 
   };
   const [projectId, setProjectId] = useState<string | null>(null);
   const [active, setActive] = useState<Run[]>([]);
+  const [checkout, setCheckout] = useState<Checkout | null>(null);
+  const overviewRequest = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(() => {
+    const generation = ++overviewRequest.current;
     rpc.call("thread_overview", { threadId }).then(
       (result) => {
-        if (currentThread.current !== threadId) return;
+        if (currentThread.current !== threadId || generation !== overviewRequest.current) return;
         setProjectId(result.projectId);
+        setCheckout(result.checkout);
         setActive(result.activeRuns);
-        setError(null);
+        setError(result.workspaceError);
       },
-      (cause) => { if (currentThread.current === threadId) setError(errorText(cause)); },
+      (cause) => { if (currentThread.current === threadId && generation === overviewRequest.current) { setError(errorText(cause)); setCheckout(null); } },
     );
   }, [rpc, threadId]);
   useEffect(load, [load]);
+  useEffect(() => sdk.subscribe({ event: "thread:changed", threadId, callback: load }), [sdk, threadId, load]);
+  useEffect(() => sdk.subscribe({ event: "environment:changed", callback: load }), [sdk, load]);
   useRealtime(CHANGED, load);
   return (
     <div className="h-full min-h-0 space-y-5 overflow-y-auto p-4" style={{ "--egm-color-elephant": "#6d63a8", "--egm-color-elephant-ink": "#514889", "--egm-color-elephant-surface": "#6d63a81a", "--egm-color-goldfish": "#c96d2d" } as CSSProperties}>
@@ -1050,8 +1115,8 @@ function ThreadTab({ threadId, target }: { threadId: string; target?: EgmTarget 
       <ErrorLine error={draftError} />
       {draftMessage && <p role="status" className="text-xs text-muted-foreground">{draftMessage}</p>}
       {pending && pending.threadId === threadId && <div className="space-y-2 rounded-md bg-muted/50 p-3"><p className="text-sm">The composer already has a draft. Append this request to its latest contents, or cancel without changing it?</p><div className="flex gap-2"><Button size="sm" onClick={() => commitDraft(pending.threadId, pending.prompt, true)}>Append</Button><Button size="sm" variant="ghost" onClick={() => { setPending(null); setDraftError(null); }}>Cancel</Button></div></div>}
-      {!target && <GuidedRequest key={threadId} threadId={threadId} onDraft={draft} />}
-      {projectId && <Workspace key={`workspace:${threadId}`} projectId={projectId} threadId={threadId} onDraft={draft} target={target} />}
+      {!target && <GuidedRequest key={`${threadId}:${checkout?.environmentId}:${checkout?.root}`} threadId={threadId} onDraft={draft} />}
+      {projectId && <Workspace key={`workspace:${threadId}:${checkout?.environmentId}:${checkout?.root}`} projectId={projectId} threadId={threadId} threadCheckout={checkout} onDraft={draft} target={target} />}
     </div>
   );
 }

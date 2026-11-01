@@ -63,11 +63,11 @@ async function setup(replies: Reply[]) {
       endpoint.fetchImpl,
     ),
     threadProject: async () => "proj",
-    projectRoot: async () => root,
+    checkoutRoot: async () => root,
     changed: () => {},
     log: { info: () => {}, warn: () => {} },
   });
-  const spec = await engine.registerSpec("proj", "docs/spec.md");
+  const spec = await engine.registerSpec("proj", "docs/spec.md", { hostId: "host", root, environmentId: "env" });
   return { root, store, engine, spec, endpoint };
 }
 

@@ -77,6 +77,7 @@ test("proposal drafts work when the thread checkout differs from the server chec
       throw new Error("Thread workspace does not match the server's available project checkout.");
     } }),
     useBbNavigate: () => ({}),
+    useSdk: () => ({ subscribe: () => () => {} }),
     useComposer: () => c.api,
     useRef: (current: unknown) => ({ current }),
     useState: (initial: unknown) => [++stateIndex === 4 ? "project" : initial, () => {}],

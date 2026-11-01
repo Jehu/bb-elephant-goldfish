@@ -79,6 +79,7 @@ Default section order:
 When the user requests a durable behavior change, record it here or in the relevant child AGENTS.md
 
 - Review limit badges name the specific cause (rounds, output, rate limit or timeout) in both the overview and review details; retain the detailed reason.
+- EGM improvements must remain agent-agnostic and must not depend on personal or external skills installed by the user. The overengineering discussion is recorded in [`docs/overengineering-leitplanken.md`](docs/overengineering-leitplanken.md); its proposed mechanisms are not yet an implementation plan.
 
 ## Project Guidance
 

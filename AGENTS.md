@@ -80,6 +80,7 @@ When the user requests a durable behavior change, record it here or in the relev
 
 - Review limit badges name the specific cause (rounds, output, rate limit or timeout) in both the overview and review details; retain the detailed reason.
 - Worktree support is required: bind specs, reviews and proposals to their checkout and apply confirmed changes there. Rejecting all worktrees is insufficient; never silently redirect their operations to the main checkout.
+- EGM improvements must remain agent-agnostic and must not depend on personal or external skills installed by the user. The overengineering discussion is recorded in [`docs/overengineering-leitplanken.md`](docs/overengineering-leitplanken.md); its proposed mechanisms are not yet an implementation plan.
 
 ## Project Guidance
 
@@ -101,6 +102,7 @@ When the user requests a durable behavior change, record it here or in the relev
 - [`server/AGENTS.md`](server/AGENTS.md) — review engine, persistence and workspace safety contracts.
 - [`skills/AGENTS.md`](skills/AGENTS.md) — adapted agent skills and bundled references.
 - [`upstream/AGENTS.md`](upstream/AGENTS.md) — pinned third-party source materials and licensing.
+- [`research/AGENTS.md`](research/AGENTS.md) — isolated EGM experiments, simulated human decisions, evidence and reproducibility.
 
 <!-- airbender:rules:start -->
 <!-- airbender:rules:version 4 -->

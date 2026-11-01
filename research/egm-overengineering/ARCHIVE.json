@@ -1,0 +1,105 @@
+{
+  "artifact_root": "/Users/marco/.bb/thread-storage/thr_vktjatb29v/egm-research-2026-11-01",
+  "runs": {
+    "excluded_setup_runs": [
+      "wfr_bccfd6dd-d447-4367-99f1-5fa40b85a858"
+    ],
+    "primary": [
+      "wfr_5f9f88e2-8869-4b96-a9a7-7988785085a1",
+      "wfr_5b651787-885f-49ab-aeef-9b36d105b44a"
+    ],
+    "followup": "wfr_fb2d9bf0-6cee-4ad8-9887-8ba8c4d54bb4",
+    "uncertainty_holdout": "wfr_5d8a671a-e1db-47d4-b553-7a7fad7a6fa6",
+    "uncertainty_repeat": "wfr_f4061668-ed70-47da-9ae1-bb582deffbda",
+    "question_audit": "wfr_49a73af5-b166-4000-9f5d-778946a1acc6",
+    "method_audit": "wfr_fa07ae4e-8687-40ba-95d8-6b6d30fe17d8"
+  },
+  "successful_agent_calls": 122,
+  "actual_worker_selections": [
+    [
+      "codex",
+      "gpt-6.1-sol",
+      "high",
+      "full"
+    ]
+  ],
+  "replayed_calls": 0,
+  "repair_attempts": 0,
+  "provider_retry_attempts": 0,
+  "audit": {
+    "calls": 122,
+    "calls_with_nonresult_tools": 0,
+    "numerical_usage_records": 117,
+    "usage_missing": 5
+  },
+  "input_files": {
+    "manifest.json": {
+      "path": "/Users/marco/.bb/thread-storage/thr_vktjatb29v/egm-research-2026-11-01/manifest.json",
+      "sha256": "ae9a21706598ff497c50f81152cb6f0cd1894caedcb4d07579ea0a1037efabd8"
+    },
+    "prompt-templates.json": {
+      "path": "/Users/marco/.bb/thread-storage/thr_vktjatb29v/egm-research-2026-11-01/prompt-templates.json",
+      "sha256": "d2130ca653b877c263e3ddb0f9ee557fdeaa00f85eaecc28223f217bacbfe591"
+    },
+    "scenarios.json": {
+      "path": "/Users/marco/.bb/thread-storage/thr_vktjatb29v/egm-research-2026-11-01/scenarios.json",
+      "sha256": "b303e0317a3e60408c50133a6dd87f2e85c317ccb47c5b0d7cebc03eedd80b5e"
+    },
+    "intervention.md": {
+      "path": "/Users/marco/.bb/thread-storage/thr_vktjatb29v/egm-research-2026-11-01/intervention.md",
+      "sha256": "d7571ebf782fe9599652b1e8394a64611a8df529467c704b2dca45eea09f51c7"
+    },
+    "batch-1-args.json": {
+      "path": "/Users/marco/.bb/thread-storage/thr_vktjatb29v/egm-research-2026-11-01/batch-1-args.json",
+      "sha256": "1a136c71fd4123b2a35da42d994e3f498acb604ecb123aa29654189a2921c9fd"
+    },
+    "batch-2-args.json": {
+      "path": "/Users/marco/.bb/thread-storage/thr_vktjatb29v/egm-research-2026-11-01/batch-2-args.json",
+      "sha256": "ce0e126c949828e2b4f98acf93a750430f2c7ea57c4565916198cc0118db5bcd"
+    },
+    "followup-manifest.json": {
+      "path": "/Users/marco/.bb/thread-storage/thr_vktjatb29v/egm-research-2026-11-01/followup-manifest.json",
+      "sha256": "6d3f0055ce139d7f471ae14e3902be168c3e83377d46dacec4a03dcbd4dd501a"
+    },
+    "followup-args.json": {
+      "path": "/Users/marco/.bb/thread-storage/thr_vktjatb29v/egm-research-2026-11-01/followup-args.json",
+      "sha256": "1a29157b228ca1ae8be339e201be951367ba8f2ffd1c06854083a52cd469546f"
+    },
+    "uncertainty-holdout-args.json": {
+      "path": "/Users/marco/.bb/thread-storage/thr_vktjatb29v/egm-research-2026-11-01/uncertainty-holdout-args.json",
+      "sha256": "b4ca533d24edd5dc692ff644d122ad8a0773634b7335f23349cf3c6ab6578539"
+    },
+    "uncertainty-repeat-args.json": {
+      "path": "/Users/marco/.bb/thread-storage/thr_vktjatb29v/egm-research-2026-11-01/uncertainty-repeat-args.json",
+      "sha256": "b31d58f3be59d9dde730f60c40586d11760823b6c6d685465ff2b1aec983a5e2"
+    },
+    "question-audit-args.json": {
+      "path": "/Users/marco/.bb/thread-storage/thr_vktjatb29v/egm-research-2026-11-01/question-audit-args.json",
+      "sha256": "ffb6c79d6219140d21edfe77f76521c2ce239dfd0133b3affb862b9fc85d09fc"
+    },
+    "method-audit-input.json": {
+      "path": "/Users/marco/.bb/thread-storage/thr_vktjatb29v/egm-research-2026-11-01/method-audit-input.json",
+      "sha256": "8609a578f4a862c4802de9c9e2b2328fb22c3a4aecea7e1ff251a0ed6bfe0166"
+    }
+  },
+  "workflow_sources": {
+    "followup.js": "98ff13e44373f2d1d91b65f355ca2ad8697bc9efb091be536e5a28ef2c512cba",
+    "method_audit.js": "06428f8aa2daf2478180b7073fb31a80da4a5ab8717f2f2649e1bd2b427e6371",
+    "question_audit.js": "69d439a3ca8851c248859a1ebe34287e25ba46c8a00496ae2d2ffd81f67d3386",
+    "workflow.js": "9c3f02308551492d93cbb80b800cb064a1c5f671525fe1be0e45731133f96649"
+  },
+  "primary_raw_histories": "runs/<run-id>/history-<cursor>.jsonl; contains each actual prompt, resolved worker metadata, response and timestamps",
+  "states": "cells/<cell-id>/artifacts/state.json; exact materialized document at cells/<cell-id>/project/research-spec.md",
+  "analysis_files": [
+    "aggregate.json",
+    "uniform-adjudication.json",
+    "decision-metrics.json",
+    "event-audit.json",
+    "native-parse-audit.json",
+    "report-lengths.json",
+    "flow-checks.json",
+    "restore-controlled-comparison.json",
+    "source-verification.json"
+  ],
+  "portability": "Raw artifacts and isolated environments are local thread storage and are not bundled with the repository."
+}

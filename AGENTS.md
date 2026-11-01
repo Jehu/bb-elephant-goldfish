@@ -100,6 +100,7 @@ When the user requests a durable behavior change, record it here or in the relev
 - [`server/AGENTS.md`](server/AGENTS.md) — review engine, persistence and workspace safety contracts.
 - [`skills/AGENTS.md`](skills/AGENTS.md) — adapted agent skills and bundled references.
 - [`upstream/AGENTS.md`](upstream/AGENTS.md) — pinned third-party source materials and licensing.
+- [`research/AGENTS.md`](research/AGENTS.md) — isolated EGM experiments, simulated human decisions, evidence and reproducibility.
 
 <!-- airbender:rules:start -->
 <!-- airbender:rules:version 4 -->

@@ -1,3 +1,8 @@
+Replace placeholders with checked facts and source references, not inferred
+contracts. Name the relevant file and symbol, flag or table where applicable.
+State unexamined areas and uncertainty in ordinary prose. Verification entries
+distinguish a suggested command from an actual run; do not invent a command
+when none is defined. Preserve accurate existing content and human notes.
 
 ### 📄 Component Package (Peanuts) README Template
 
@@ -18,7 +23,8 @@
 - [State mutations, network calls, disk access, locks, or external side effects]
 
 ## Verification
-- Run: `<test-command>`
+- Suggested command: `<command from manifest/build rules>` (working directory: `<path>`)
+- Status: `<not run and reason, or actual result of an authorized run>`
 ```
 
 ### 📄 Repository Root (Blueprint / Hay) README Template
@@ -43,7 +49,8 @@
 - [Shared resources, databases, or external integrations affected by this subsystem]
 
 ## System Verification
-- Run: `<test-command>`
+- Suggested command: `<command from manifest/build rules>` (working directory: `<path>`)
+- Status: `<not run and reason, or actual result of an authorized run>`
 ```
 
 ### 📄 Intermediate Blueprint README Template

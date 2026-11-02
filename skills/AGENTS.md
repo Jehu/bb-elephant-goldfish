@@ -43,6 +43,9 @@ Seven agent skills adapting the pinned Elephant-Goldfish Model to BB.
 - Drift is bounded analysis, not an AST equivalence guarantee.
 - Bootstrap is documentation-only, respects ignores and symlinks, and asks
   before expanding beyond 15 discovered directories.
+  Ground contracts in inspected sources and reread every written contract,
+  including links and diagrams. Preserve accurate existing content; distinguish
+  suggested commands from actual check results and expose unexamined scope.
 
 ## Work Guidance
 

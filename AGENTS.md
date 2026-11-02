@@ -85,6 +85,7 @@ When the user requests a durable behavior change, record it here or in the relev
 ## Project Guidance
 
 - This repository implements a BB spec workspace adapting `google/elephant-goldfish-model`; see `README.md` for installation and workflows.
+- [`docs/upstream-skill-update-review.md`](docs/upstream-skill-update-review.md) records the dated upstream comparison and recommendations for the seven BB skills; it does not authorize updates or change the pinned source.
 - The root owns project-wide guidance and configuration. `.bend.json` selects Beads; `.beads/` holds its configuration and tracker data.
 - Development checks are `npm run typecheck`, `npm test`, and `npm run build` (Node 24); reload with `bb plugin reload elephant-goldfish`.
 - Full-page Spec workspace routes own their vertical scrolling inside BB's bounded content area; keep both the overview and linked detail scrollable.

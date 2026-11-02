@@ -22,6 +22,9 @@ Seven agent skills adapting the pinned Elephant-Goldfish Model to BB.
 - Resolve runtime references relative to the registered skill directory, not
   the user's working directory or the repository's upstream tree.
 - Reviewed specs change only through an `egm_propose` diff the human confirms.
+- Resolve cites checked evidence and exposes remaining knowledge questions.
+  Distinguish unclear text from missing review context; Nit dismissals are
+  recommendations only. Keep existing tool actions and human decisions distinct.
 - New full/feature-spec Comprehension stages return a separate paraphrase without
   a document standard. Read it alongside findings, including at zero findings;
   incomplete reports are not success. Brainstorm and Custom retain their contracts.

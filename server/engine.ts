@@ -243,6 +243,7 @@ export class Engine {
     let content: string | null = null;
     let hash: string | null = null;
     let workspaceError: string | null = null;
+    let workspaceErrorCode: Spec["workspaceErrorCode"] = null;
     try {
       const root = await this.root(spec);
       const file = await readInside(root, spec.path);
@@ -252,6 +253,7 @@ export class Engine {
       }
     } catch (cause) {
       workspaceError = cause instanceof Error ? cause.message : String(cause);
+      workspaceErrorCode = cause instanceof WorkspaceError ? cause.code ?? null : null;
     }
     if (content !== null) {
       const title = titleOf(content, spec.title);
@@ -271,6 +273,7 @@ export class Engine {
         title: content !== null ? titleOf(content, spec.title) : spec.title,
         checkout: spec.checkout ?? null,
         workspaceError,
+        workspaceErrorCode,
         currentHash: hash,
         exists: content !== null,
         latestRun: latest

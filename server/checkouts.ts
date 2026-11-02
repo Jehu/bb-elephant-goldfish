@@ -41,7 +41,13 @@ export class Checkouts {
 
   async environment(projectId: string, environmentId: string): Promise<Checkout> {
     const env = await this.bb.sdk.environments.get({ environmentId });
-    if (!env || env.projectId !== projectId || env.status !== "ready" || !env.path) {
+    if (!env || env.projectId !== projectId) {
+      throw new WorkspaceError("The checkout environment is unavailable or belongs to another project.");
+    }
+    if (env.status === "destroyed") {
+      throw new WorkspaceError("The checkout environment was removed. Its saved review history is still available.", "checkout_removed");
+    }
+    if (env.status !== "ready" || !env.path) {
       throw new WorkspaceError("The checkout environment is unavailable or belongs to another project.");
     }
     await this.requireLocal(env.hostId);

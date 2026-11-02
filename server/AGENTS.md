@@ -85,6 +85,12 @@ spec changes for the Elephant Goldfish BB plugin.
   Keep their IDs and history; proposals without checkout provenance cannot be
   applied. Binding stales legacy pending proposals and completed/waiting runs,
   releases proposal findings and removes deferred automatic review tasks.
+- `Spec.workspaceErrorCode` is an optional live projection, not persisted state.
+  Only an environment belonging to the spec's project with BB status `destroyed`
+  yields `checkout_removed`. Missing or unreachable environments, foreign
+  projects and absent paths do not prove removal. Retain the detailed error,
+  original checkout and saved history; availability classification never changes
+  review, apply or registration ownership.
 - The checkout migration replaces the referenced specs table. Disable foreign
   keys outside the migration transaction, restore them in finally, and check
   foreign_key_check. Preserve every dependent row and any saved apply target.

@@ -47,7 +47,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { makePrompt, writePrompt } from "./composer";
-import { reviewLimitLabel } from "./lib/review-limit";
+import { reviewStatusLabel } from "./lib/review-status";
 import { egmLink, parseTargetPath, targetPath, targetSchema, type EgmTarget } from "./lib/egm-links";
 
 const CHANGED = "egm-changed";
@@ -66,16 +66,6 @@ const opId = () => crypto.randomUUID().replaceAll("-", "").slice(0, 32);
 const errorText = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 const time = (at: number | null) => (at === null ? "" : new Date(at).toLocaleString());
 
-const RUN_LABEL: Record<RunState, string> = {
-  running: "Running",
-  awaiting_decisions: "Waiting for your decisions",
-  completed: "Completed",
-  failed: "Failed",
-  cancelled: "Cancelled",
-  limit_reached: "Review stopped at a limit",
-  stale: "Stopped: document changed",
-  unknown: "Unknown",
-};
 const RUN_TONE: Record<RunState, string> = {
   running: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
   awaiting_decisions: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
@@ -187,7 +177,7 @@ function Section({ title, children, actions }: { title: ReactNode; children: Rea
 function ErrorLine({ error }: { error: string | null }) {
   if (!error) return null;
   return (
-    <p role="alert" className="rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-sm text-red-600 dark:text-red-400">
+    <p role="alert" className="break-words rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-sm text-red-600 dark:text-red-400">
       {error}
     </p>
   );
@@ -291,34 +281,47 @@ function GuidedRequest({ threadId, onDraft }: { threadId: string; onDraft: Draft
 
 // --- spec list -------------------------------------------------------------
 
+function SpecAvailability({ spec }: { spec: Spec }) {
+  if (spec.exists) return null;
+  const label = !spec.checkout ? "Checkout assignment required"
+    : spec.workspaceErrorCode === "checkout_removed" ? "Checkout removed"
+    : spec.workspaceError ? "Checkout unavailable" : "File missing";
+  const needsAttention = spec.checkout !== null && spec.workspaceErrorCode !== "checkout_removed";
+  return <Badge className={cn("whitespace-normal break-words", needsAttention ? "bg-red-500/15 text-red-600" : "bg-muted text-muted-foreground")} title={spec.workspaceError ?? undefined}>{label}</Badge>;
+}
+
 function SpecRow({ spec, onOpen, onForget }: { spec: Spec; onOpen: () => void; onForget: () => void }) {
   const run = spec.latestRun;
   return (
-    <li className="flex items-center gap-1">
+    <li className="flex items-start gap-1">
       <button
         type="button"
         onClick={onOpen}
-        className="flex min-w-0 flex-1 items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-state-hover"
+        className="min-w-0 flex-1 space-y-2 rounded-md px-2 py-2 text-left hover:bg-state-hover"
       >
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium">{spec.title}</div>
-          <div className="truncate font-mono text-xs text-muted-foreground">{spec.path}</div>
-          <div className="truncate text-xs text-muted-foreground" title={spec.checkout?.root}>{spec.checkout ? spec.checkout.root : "Checkout assignment required"}</div>
+        <div>
+          <div className="break-words text-sm font-medium">{spec.title}</div>
+          <div className="break-all font-mono text-xs text-muted-foreground">{spec.path}</div>
+          {spec.checkout && <div className="break-all text-xs text-muted-foreground">Checkout: {spec.checkout.root}</div>}
         </div>
-        {!spec.exists && <Badge className="bg-red-500/15 text-red-600" title={spec.workspaceError ?? undefined}>{spec.workspaceError ? "Checkout unavailable" : "File missing"}</Badge>}
-        {run ? (
-          <>
-            <Badge className={RUN_TONE[run.state]} title={run.stateReason ?? undefined}>{run.state === "limit_reached" ? reviewLimitLabel(run.stateReason) : RUN_LABEL[run.state]}</Badge>
-            {run.stale && run.state !== "running" && <Badge className="bg-orange-500/15 text-orange-700">Outdated</Badge>}
-          </>
-        ) : (
-          <Badge className="bg-muted text-muted-foreground">Not reviewed</Badge>
-        )}
-        {spec.pendingDecisions > 0 && (
-          <Badge className="bg-amber-500/15 text-amber-700 dark:text-amber-400">{spec.pendingDecisions} to decide</Badge>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <SpecAvailability spec={spec} />
+          {run ? (
+            <>
+              <Badge className={cn(RUN_TONE[run.state], "whitespace-normal break-words")} title={run.stateReason ?? undefined}>{reviewStatusLabel(run.state, run.stateReason)}</Badge>
+              {spec.currentHash !== null && run.stale && run.state !== "running" && <Badge className="bg-orange-500/15 text-orange-700">Outdated</Badge>}
+            </>
+          ) : (
+            <Badge className="whitespace-normal bg-muted text-muted-foreground">Not reviewed in this checkout</Badge>
+          )}
+          {spec.pendingDecisions > 0 && (
+            <Badge className="bg-amber-500/15 text-amber-700 dark:text-amber-400">{spec.pendingDecisions} to decide</Badge>
+          )}
+        </div>
+        {spec.workspaceError && <p className="break-words text-xs text-muted-foreground">{spec.workspaceError}</p>}
+        {run?.state === "stale" && run.stateReason && <p className="break-words text-xs text-muted-foreground">{run.stateReason}</p>}
       </button>
-      <Button size="sm" variant="ghost" className="text-muted-foreground" aria-label={`Remove review for ${spec.path}`} onClick={onForget}>Forget</Button>
+      <Button size="sm" variant="ghost" className="shrink-0 text-muted-foreground" aria-label={`Remove review for ${spec.path}`} onClick={onForget}>Forget</Button>
     </li>
   );
 }
@@ -442,6 +445,7 @@ function SpecList({ projectId, threadId, onOpen }: { projectId: string; threadId
     <div className="space-y-3">
       <ErrorLine error={error} />
       {root && <p className="break-all text-xs text-muted-foreground">Checkout: {root}</p>}
+      {specs && specs.length > 0 && <p className="text-xs text-muted-foreground">Each checkout has its own spec registrations and review history.</p>}
       {specs === null ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : specs.length === 0 ? (
@@ -571,14 +575,14 @@ function StartReview({ spec, threadId, reviewer }: { spec: Spec; threadId: strin
     </div>
   );
 }
-function RunCard({ run, stages, onCancel }: { run: Run; stages: Stage[]; onCancel: () => void }) {
+function RunCard({ run, stages, currentHash, onCancel }: { run: Run; stages: Stage[]; currentHash: string | null; onCancel: () => void }) {
   const mine = stages.filter((s) => s.runId === run.id);
   return (
     <div className="space-y-2 border-l-2 border-l-border pl-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-sm font-medium">Round {run.round}</span>
-        <Badge className={RUN_TONE[run.state]} title={run.stateReason ?? undefined}>{run.state === "limit_reached" ? reviewLimitLabel(run.stateReason) : RUN_LABEL[run.state]}</Badge>
-        {run.stale && <Badge className="bg-orange-500/15 text-orange-700">Reviewed an older version</Badge>}
+        <Badge className={cn(RUN_TONE[run.state], "whitespace-normal break-words")} title={run.stateReason ?? undefined}>{reviewStatusLabel(run.state, run.stateReason)}</Badge>
+        {currentHash !== null && run.stale && <Badge className="bg-orange-500/15 text-orange-700">Reviewed an older version</Badge>}
         <span className="text-xs text-muted-foreground">
           {run.preset} · version <span className="font-mono">{run.targetHash.slice(0, 10)}</span> · {time(run.createdAt)}
         </span>
@@ -588,7 +592,7 @@ function RunCard({ run, stages, onCancel }: { run: Run; stages: Stage[]; onCance
           </Button>
         )}
       </div>
-      {run.stateReason && <p className="text-xs text-muted-foreground">{run.stateReason}</p>}
+      {run.stateReason && <p className="break-words text-xs text-muted-foreground">{run.stateReason}</p>}
       <p className="text-xs text-muted-foreground">
         Reviewer: {run.engine}{run.provider ? ` · ${run.provider}` : ""}{run.model ? ` · ${run.model}` : ""}{run.threadId ? ` · thread ${run.threadId}` : ""}
       </p>
@@ -880,10 +884,12 @@ function SpecDetail({ specId, threadId, threadCheckout, onBack, onDraft, target 
           <Mark label="Elephant Goldfish" className="size-6" />
           <h2 className="text-lg font-semibold tracking-tight">{spec.title}</h2>
         </div>
-        <p className="font-mono text-xs text-muted-foreground">
-          {spec.path} · {spec.currentHash ? `current version ${spec.currentHash.slice(0, 10)}` : "file missing"}
+        <p className="break-all font-mono text-xs text-muted-foreground">
+          {spec.path}{spec.currentHash ? ` · current version ${spec.currentHash.slice(0, 10)}` : ""}
         </p>
         {spec.checkout && <p className="break-all text-xs text-muted-foreground">Checkout: {spec.checkout.root} · {spec.checkout.hostId}</p>}
+        <SpecAvailability spec={spec} />
+        {detail.runs.length === 0 && <p className="text-xs text-muted-foreground">Not reviewed in this checkout</p>}
         <ReviewerBanner status={reviewer} />
       </div>
       <ErrorLine error={actionError} />
@@ -955,7 +961,7 @@ function SpecDetail({ specId, threadId, threadCheckout, onBack, onDraft, target 
       <Section title="Review">
         {(!threadId || sameCheckout) && <StartReview spec={spec} threadId={threadId} reviewer={reviewer} />}
         {detail.runs.slice(0, 5).map((run) => (
-          <RunCard key={run.id} run={run} stages={detail.stages} onCancel={() => act(rpc.call("review_cancel", { runId: run.id }))} />
+          <RunCard key={run.id} run={run} stages={detail.stages} currentHash={spec.currentHash} onCancel={() => act(rpc.call("review_cancel", { runId: run.id }))} />
         ))}
       </Section>
 

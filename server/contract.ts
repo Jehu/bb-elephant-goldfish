@@ -116,6 +116,8 @@ export const specSchema = z.object({
   title: z.string(),
   checkout: checkoutSchema.nullable(),
   workspaceError: z.string().nullable(),
+  /** Only a confirmed destroyed environment is classified as removed. */
+  workspaceErrorCode: z.literal("checkout_removed").nullable().optional(),
   /** sha256 of the file as it is on disk right now, or null when missing. */
   currentHash: z.string().nullable(),
   exists: z.boolean(),

@@ -236,6 +236,11 @@ an explicit reading list: linked files and URLs are not fetched automatically.
 - Missing, moved or unavailable environments are reported without falling back
   to the main checkout. The plugin does not read or apply specs on another
   enrolled machine, even when that machine uses identical path names.
+  Confirmed removed checkouts are labeled separately; their saved review history
+  remains accessible. The overview shows full checkout paths and identifies a
+  registration without reviews as not reviewed in that checkout. Review labels
+  distinguish checkout assignment, replacement by a newer review and document
+  changes, while retaining the detailed reason.
 - No commits or issue sync are performed by the plugin.
 
 ## Development

@@ -9,7 +9,14 @@ export const sha256 = (content: string): string => createHash("sha256").update(c
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
-export class WorkspaceError extends Error {}
+export class WorkspaceError extends Error {
+  readonly code?: "checkout_removed";
+
+  constructor(message: string, code?: "checkout_removed") {
+    super(message);
+    this.code = code;
+  }
+}
 
 /**
  * Resolve a workspace-relative path to an absolute one inside `root`,

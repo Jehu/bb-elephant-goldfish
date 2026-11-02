@@ -79,6 +79,7 @@ Default section order:
 When the user requests a durable behavior change, record it here or in the relevant child AGENTS.md
 
 - Review limit badges name the specific cause (rounds, output, rate limit or timeout) in both the overview and review details; retain the detailed reason.
+- Review status labels distinguish checkout assignment, superseded reviews and document changes in both views; unknown causes stay neutral. Show complete checkout paths and checkout-specific review history. Distinguish confirmed removed checkouts, other availability errors, missing files and required legacy assignment without deleting or retargeting registrations.
 - Worktree support is required: bind specs, reviews and proposals to their checkout and apply confirmed changes there. Rejecting all worktrees is insufficient; never silently redirect their operations to the main checkout.
 - EGM improvements must remain agent-agnostic and must not depend on personal or external skills installed by the user. Shared review rules live in [`server/review-guidelines.md`](server/review-guidelines.md) and reach Elephant and Goldfish directly. The original discussion and bounded research remain in [`docs/overengineering-leitplanken.md`](docs/overengineering-leitplanken.md) and [`research/egm-overengineering/RESULTS.md`](research/egm-overengineering/RESULTS.md).
 

@@ -9,7 +9,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import plugin from "../server.ts";
 import { Engine, type ReviewEngine, type ReviewerCall } from "./engine.ts";
 import { MIGRATIONS, Store } from "./store.ts";
-import type { Checkout } from "./contract.ts";
+import { specSchema, type Checkout } from "./contract.ts";
 import { sha256 } from "./workspace.ts";
 import { reviewGuidelines } from "./prompts.ts";
 
@@ -31,7 +31,9 @@ test("specs and confirmed apply stay in their worktree even when the author move
   let rpc: Record<string, (params: any) => Promise<any>> = {};
   const disposers: (() => void | Promise<void>)[] = [];
   let authorEnvironment = "a";
-  const environments = [main, a, b].map((root, i) => ({ id: ["main", "a", "b"][i]!, projectId: "p", hostId: "host", path: root, status: "ready", name: path.basename(root) }));
+  let environmentFailure = false;
+  let environmentMissing = false;
+  const environments: { id: string; projectId: string; hostId: string; path: string | null; status: string; name: string }[] = [main, a, b].map((root, i) => ({ id: ["main", "a", "b"][i]!, projectId: "p", hostId: "host", path: root, status: "ready", name: path.basename(root) }));
   const bb = {
     pluginId: "elephant-goldfish",
     settings: { define: () => ({ get: async () => ({ reviewerEngine: "goldfish" }) }) },
@@ -39,7 +41,11 @@ test("specs and confirmed apply stay in their worktree even when the author move
     sdk: {
       projects: { get: async () => ({ sources: [{ type: "local_path", path: main, hostId: "host", isDefault: true }] }) },
       threads: { get: async ({ threadId }: { threadId: string }) => ({ projectId: "p", environmentId: threadId === "author" ? authorEnvironment : threadId }) },
-      environments: { get: async ({ environmentId }: { environmentId: string }) => environments.find(e => e.id === environmentId), list: async () => environments, paths: async () => ({ paths: [{ kind: "file", path: "spec.md" }], truncated: false }) },
+      environments: { get: async ({ environmentId }: { environmentId: string }) => {
+        if (environmentId === "a" && environmentFailure) throw new Error("Environment lookup temporarily failed");
+        if (environmentId === "a" && environmentMissing) return undefined;
+        return environments.find(e => e.id === environmentId);
+      }, list: async () => environments, paths: async () => ({ paths: [{ kind: "file", path: "spec.md" }], truncated: false }) },
       files: { read: async ({ path: file }: { path: string }) => ({ content: await fs.readFile(file, "utf8"), contentEncoding: "utf8" }) },
     },
     realtime: { publish: () => {} }, log: { info: () => {}, warn: () => {} },
@@ -93,8 +99,46 @@ test("specs and confirmed apply stay in their worktree even when the author move
     environments.find(e => e.id === "a")!.path = b;
     const unavailable = await rpc.spec_detail!({ specId: sa.id });
     assert.match(unavailable.spec.workspaceError, /environment changed/);
+    assert.equal(unavailable.spec.workspaceErrorCode, null);
     assert.equal(unavailable.content, null);
     assert.equal((await rpc.spec_detail!({ specId: sb.id })).content, "# Original\n");
+
+    const envA = environments.find(e => e.id === "a")!;
+    const history = { runs: unavailable.runs, stages: unavailable.stages, findings: unavailable.findings, proposals: unavailable.proposals };
+    for (const scenario of [
+      { status: "destroyed", path: null, projectId: "p", removed: true },
+      { status: "error", path: null, projectId: "p", removed: false },
+      { status: "ready", path: null, projectId: "p", removed: false },
+      { status: "destroyed", path: null, projectId: "other", removed: false },
+      { status: "ready", path: a, projectId: "p", removed: false, missing: true },
+      { status: "ready", path: a, projectId: "p", removed: false, failure: true },
+    ]) {
+      Object.assign(envA, { status: scenario.status, path: scenario.path, projectId: scenario.projectId });
+      environmentMissing = "missing" in scenario;
+      environmentFailure = "failure" in scenario;
+      const detail = await rpc.spec_detail!({ specId: sa.id });
+      const listed = (await rpc.specs_list!({ projectId: "p" })).specs.find((s: { id: string }) => s.id === sa.id);
+      for (const spec of [detail.spec, listed]) {
+        assert.equal(specSchema.safeParse(spec).success, true);
+        assert.equal(spec.workspaceErrorCode, scenario.removed ? "checkout_removed" : null);
+        assert.ok(spec.workspaceError);
+        assert.equal(spec.exists, false);
+        assert.equal(spec.checkout.root, a, "unavailable checkouts must retain their original target");
+      }
+      assert.deepEqual({ runs: detail.runs, stages: detail.stages, findings: detail.findings, proposals: detail.proposals }, history);
+    }
+    environmentMissing = environmentFailure = false;
+    Object.assign(envA, { status: "ready", path: a, projectId: "p" });
+    const available = (await rpc.spec_detail!({ specId: sa.id })).spec;
+    assert.equal(available.exists, true);
+    assert.equal(available.workspaceErrorCode, null);
+    const { workspaceErrorCode: _code, ...legacyShape } = available;
+    assert.equal(specSchema.safeParse(legacyShape).success, true, "the additional code is optional for existing callers");
+    await fs.rm(path.join(a, "spec.md"));
+    const missingFile = (await rpc.spec_detail!({ specId: sa.id })).spec;
+    assert.equal(missingFile.exists, false);
+    assert.equal(missingFile.workspaceError, null);
+    assert.equal(missingFile.workspaceErrorCode, null, "a missing file is not a removed checkout");
   } finally {
     for (const dispose of disposers.reverse()) await dispose();
     db.close();
@@ -140,6 +184,7 @@ test("checkout migration preserves references and requires explicit assignment f
     const unbound = await engine.describeSpec(store.getSpec("s")!);
     assert.equal(unbound.content, null);
     assert.match(unbound.spec.workspaceError!, /explicit checkout assignment/);
+    assert.equal(unbound.spec.workspaceErrorCode, null);
     assert.equal(store.getProposal("pr")!.state, "proposed", "reading an unbound spec preserves its old diff");
     const checkout = { hostId: "host", root, environmentId: "env" };
     await assert.rejects(engine.bindCheckout("s", checkout), /unfinished apply/);

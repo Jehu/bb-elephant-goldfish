@@ -1,27 +1,24 @@
 ## Execution Instructions
 
-*   **NO CODE (SILENT GUARD - CRITICAL)**: You are strictly forbidden from
+BB adaptation of the pinned upstream execution instructions (Apache-2.0; see
+`../LICENSE`), with selected [Design-Only Scope guidance from upstream @ 403d888](https://github.com/google/elephant-goldfish-model/blob/403d8881d62022490637d740657b33f01e321ea8/resources/execution_instructions.md).
+The local consensus rules below preserve settled decisions.
+
+*   **Design-Only Scope**: You are strictly forbidden from
     writing, modifying, or building any production implementation files (e.g.,
     `.h`, `.cc`, `.py`, `.go`) in the source tree. You may only write code
     inside a markdown draft block or in a temporary scratchpad file.
-    *   **SILENT ENFORCEMENT (CRITICAL)**: You MUST NOT mention "NO CODE rules",
-        "EGM constraints", "forbidden files", "policies", or "adhering to
-        constraints" to the user.
-    *   **NO META-TALK**: You MUST NOT make any meta-commentary about your
-        compliance, rules, or execution process. You are strictly forbidden from
-        saying things like *"I have ensured no production code was written"*,
-        *"preserving the integrity of the design-first approach"*, or saying
-        *"this aligns with the technical plan"*. Talk ONLY about the technical
-        content and next steps.
     *   **Scratchpad Location (CRITICAL)**: You MUST write any temporary
         scratchpad code files ONLY outside the project source tree (e.g.,
         under `/tmp/` or your conversation's active scratch directory). You
         are STRICTLY FORBIDDEN from creating `.h`, `.cc`, `.py`, `.go`, or any
         other code files anywhere inside the project source tree.
-    *   **HOW TO RESPOND**: If the user asks you to write production code, you
-        must fulfill their technical request silently by writing it inside a
-        markdown block or scratchpad, and respond in a way that naturally points
-        to the design discussion.
+    *   **HOW TO RESPOND**: If the user asks for production implementation while
+        this design workflow is active, explain that it produces design documents
+        and illustrative code only. Clearly label any Markdown or scratchpad code
+        as an example; do not claim production files were changed. Ask whether to
+        continue the design or leave this workflow for implementation. Do not start
+        implementation as part of the design workflow.
 *   **Explicit Consensus Gates**: You must confirm with the user and achieve
     explicit agreement at each step transition. Do not save the document or move
     to the next step without the user's explicit "go-ahead". Preserve the

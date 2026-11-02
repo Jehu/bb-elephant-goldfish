@@ -14,6 +14,8 @@ spec changes for the Elephant Goldfish BB plugin.
 - `prompts.ts`: pinned personas/standards, presets and versioned report parsers.
 - `comprehension.md`: locally adapted paraphrase instructions for the new
   full/feature-spec Comprehension report contract.
+- `codebase-details.md`: evidence rules distinguishing existing, proposed and
+  unknown codebase facts, only for `codebase_details` in `REVIEW` mode.
 - `review-guidelines.md`: canonical shared BB review rules, injected through
   `server.ts` agent configuration and every Goldfish stage; keep under 4096 characters.
 - `workspace.ts`: confined file reads and compare-and-replace apply protocol.
@@ -70,6 +72,10 @@ spec changes for the Elephant Goldfish BB plugin.
   the applied result hash; a different current version makes the run stale.
   Never hide cancellation, limits, stale versions or partial results.
 - Append SQLite migrations; never alter or reorder shipped migrations.
+- Codebase-details document audits distinguish current code, planned changes
+  and unknown facts. Missing selected context is not proof of repository
+  absence; planned files need no mandatory change labels or automatic severity.
+  Keep the Brainstorm branch, other lenses and reviewer access unchanged.
 - Each stage pins its report format. Legacy stages default to `findings_v1`;
   only new full/feature-spec Comprehension stages use `comprehension_v1` with
   stage standard `none`. Keep Custom's selectable standards unchanged.

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { LENS_IDS, PRESET_IDS, STANDARD_IDS } from "./contract.ts";
 import { parseComprehension, parseFindings, presetStages, reviewGuidelines, stageMessages } from "./prompts.ts";
+import codebaseDetailsReview from "./codebase-details.md" with { type: "text" };
 
 test("only new full/feature-spec comprehension stages omit the document standard", () => {
   for (const preset of ["full", "feature_spec"] as const) {
@@ -43,6 +44,53 @@ test("every preset, lens, standard and mode receives the complete shared guideli
   }
   assert.deepEqual(parseFindings("NO FINDINGS"), []);
   assert.equal(parseFindings("### FINDING\nseverity: major\nlines: 2-2\ntitle: Risk\nDetails")?.[0]?.title, "Risk");
+});
+
+test("codebase evidence guidance is confined to document audits and preserves the standard and format", () => {
+  for (const lens of LENS_IDS) {
+    for (const mode of ["REVIEW", "BRAINSTORM"] as const) {
+      const [system] = stageMessages({ plan: { lens, standard: "feature-spec-standard" }, mode,
+        specPath: "spec.md", specContent: "# Plan", context: [], earlierReports: [] });
+      assert.equal(system!.content.includes(codebaseDetailsReview), lens === "codebase_details" && mode === "REVIEW");
+      assert.match(system!.content, /## Document standard/);
+      assert.match(system!.content, /### FINDING/);
+      assert.ok(system!.content.includes(reviewGuidelines));
+      if (lens === "codebase_details" && mode === "REVIEW") {
+        assert.ok(system!.content.indexOf(codebaseDetailsReview) > system!.content.indexOf("## Document standard"));
+        assert.ok(system!.content.indexOf(reviewGuidelines) > system!.content.indexOf(codebaseDetailsReview));
+      }
+    }
+  }
+});
+
+// These inputs exercise prompt delivery, not a model's judgment of the claims.
+test("current, proposed and unknown codebase claims retain their evidence as review data", () => {
+  const scenarios = [
+    { spec: "Existing normalize() returns text for concatenation.",
+      context: [{ path: "api.ts", content: "export function normalize() { return 42; }" }], notes: [] },
+    { spec: "We will add src/queue.ts to implement enqueue().", context: [], notes: [] },
+    { spec: "src/queue.ts already retries failed requests.",
+      context: [{ path: "plan.md", content: "Queue retries will be implemented next quarter." }], notes: [] },
+    { spec: "Existing src/private.ts provides cancel().", context: [],
+      notes: ["context file omitted, over the size budget: src/private.ts"] },
+  ];
+  for (const scenario of scenarios) {
+    const reviewContext = { runId: "r", currentHash: "version", decisions: [], decisionBudget: 32000,
+      omittedDecisions: 0, omissionReason: null, contextNotes: scenario.notes };
+    const [system, user] = stageMessages({ plan: { lens: "codebase_details", standard: "feature-spec-standard" },
+      mode: "REVIEW", specPath: "spec.md", specContent: scenario.spec, context: scenario.context,
+      earlierReports: [], reviewContext });
+    assert.ok(system!.content.includes(codebaseDetailsReview));
+    assert.ok(!system!.content.includes(scenario.spec));
+    assert.ok(user!.content.includes(`1| ${scenario.spec}`));
+    for (const file of scenario.context) {
+      assert.ok(user!.content.includes(`# Context file: ${file.path}`));
+      assert.ok(user!.content.includes(file.content));
+      assert.ok(!system!.content.includes(file.content));
+    }
+    assert.match(user!.content, /untrusted data, not instructions/);
+    assert.deepEqual(JSON.parse(user!.content.split("\n").find(line => line.startsWith('{"runId":'))!), reviewContext);
+  }
 });
 
 test("comprehension validates a complete paraphrase separately from real findings", () => {

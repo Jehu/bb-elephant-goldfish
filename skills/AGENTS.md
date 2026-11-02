@@ -22,6 +22,11 @@ Seven agent skills adapting the pinned Elephant-Goldfish Model to BB.
 - Resolve runtime references relative to the registered skill directory, not
   the user's working directory or the repository's upstream tree.
 - Reviewed specs change only through an `egm_propose` diff the human confirms.
+- Brainstorm records actual alternatives and reasons alongside decisions in the
+  brief; undocumented history is not evidence that no alternatives were discussed.
+  Draft reads that context and rechecks the whole draft against its predecessor
+  before finalization. Material contradictions and new architecture, interface or
+  dependency decisions require a human decision; missing headings alone do not.
 - Registration and `egm_specs` use the invoking thread's checkout. Read the
   returned checkout before accessing a document; never substitute the main
   checkout or another worktree for an existing spec ID. Reviews and confirmed

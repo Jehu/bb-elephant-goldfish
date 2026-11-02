@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { BbReviewer } from "./bb-reviewer.ts";
 import { presetStages, reviewGuidelines, stageMessages } from "./prompts.ts";
+import codebaseDetailsReview from "./codebase-details.md" with { type: "text" };
 
 type TurnCompletedData = { status: "completed" | "failed" | "interrupted"; error?: { message: string } };
 type EventRow = { type: string; data: TurnCompletedData };
@@ -19,6 +20,21 @@ test("BB passes the comprehension prompt and structured response unchanged", asy
   if (result.ok) assert.equal(result.text, output);
   assert.equal(calls.spawn[0]!.input[0]!.text, messages.map(m => `${m.role.toUpperCase()}:\n${m.content}`).join("\n\n"));
   assert.doesNotMatch(messages[0]!.content, /## Document standard/);
+});
+
+test("BB preserves codebase evidence guidance and unknown context in its worker prompt", async () => {
+  const { bb, calls } = bbFixture({ type: "turn/completed", data: { status: "completed" } });
+  const messages = stageMessages({ plan: { lens: "codebase_details", standard: "feature-spec-standard" },
+    mode: "REVIEW", specPath: "spec.md", specContent: "We will add queue.ts.",
+    context: [{ path: "api.ts", content: "export function normalize() { return 42; }" }], earlierReports: [],
+    reviewContext: { runId: "r", currentHash: "version", decisions: [], decisionBudget: 32000,
+      omittedDecisions: 0, omissionReason: null, contextNotes: ["context file refused: private.ts"] } });
+  await new BbReviewer(bb, async () => 1000).complete(messages, new AbortController().signal,
+    { projectId: "p", environmentId: "env", provider: null, model: null });
+  assert.ok(messages[0]!.content.includes(codebaseDetailsReview));
+  assert.equal(calls.spawn[0]!.input[0]!.text, messages.map(m => `${m.role.toUpperCase()}:\n${m.content}`).join("\n\n"));
+  assert.ok(calls.spawn[0]!.input[0]!.text.includes("context file refused: private.ts"));
+  assert.deepEqual(calls.spawn[0]!.environment, { type: "reuse", environmentId: "env" });
 });
 
 test("a BB timeout is a limit with no invented report and cleans up its worker", async () => {

@@ -6,10 +6,11 @@ import path from "node:path";
 import { test } from "node:test";
 import Database from "better-sqlite3";
 import { Engine, type ReviewEngine, type ReviewerCall, type ReviewerSnapshot } from "./engine.ts";
-import { GoldfishClient, type GoldfishResult } from "./goldfish.ts";
+import { GoldfishClient, type GoldfishMessage, type GoldfishResult } from "./goldfish.ts";
 import { MIGRATIONS, Store } from "./store.ts";
 import { sha256 } from "./workspace.ts";
-import { reviewGuidelines, type ReviewContext } from "./prompts.ts";
+import { reviewGuidelines, STANDARDS, type ReviewContext } from "./prompts.ts";
+import codebaseDetailsReview from "./codebase-details.md" with { type: "text" };
 
 /**
  * `gate`: the reply waits until the test opens it (and still honors abort).
@@ -190,6 +191,52 @@ async function setup(replies: Reply[], options: { configured?: boolean; bb?: () 
 
 const sentContext = (content: string): ReviewContext =>
   JSON.parse(content.split("\n").find((line) => line.startsWith('{"runId":'))!);
+
+for (const engineKind of ["goldfish", "bb"] as const) {
+  test(`${engineKind} transports the codebase audit contract with selected evidence and context limits`, async (t) => {
+    const bb = fakeBb(["NO FINDINGS"]);
+    const f = await setup([{ content: "NO FINDINGS" }], engineKind === "bb" ? { bb: bb.reviewer } : {});
+    t.after(async () => { f.engine.dispose(); await f.engine.settle(); f.db.close(); await fs.rm(f.root, { recursive: true, force: true }); });
+    const source = "export function normalize() { return 42; }";
+    const unselected = "export function cancelPrivateTask() {}";
+    const document = "# Spec\nExisting normalize() returns text.\nWe will add queue.ts for retries.\nExisting private.ts provides cancellation.\n";
+    await fs.writeFile(path.join(f.root, "api.ts"), source);
+    await fs.writeFile(path.join(f.root, "private.ts"), unselected);
+    await fs.writeFile(path.join(f.root, "huge.ts"), "x".repeat(400001));
+    await fs.mkdir(path.join(f.root, "not-file.ts"));
+    await fs.writeFile(path.join(f.root, "docs/spec.md"), document);
+    f.store.grantReviewerConsent();
+    const run = await f.engine.startRun(f.spec.id, { preset: "custom", lenses: ["codebase_details"],
+      standard: "implementation-readiness-standard", context: ["api.ts", "huge.ts", "not-file.ts"], maxRounds: 1, threadId: null });
+    await f.engine.settle();
+    // The canned report proves transport/completion only, not correct model judgment.
+    assert.equal(f.store.getRun(run.id)!.state, "completed");
+    const messages = engineKind === "bb" ? bb.requests[0]! : f.endpoint.requests[0]!.messages;
+    assert.deepEqual(messages.map(m => m.role), ["system", "user"]);
+    assert.ok(messages[0]!.content.includes(codebaseDetailsReview));
+    assert.ok(messages[0]!.content.includes(STANDARDS["implementation-readiness-standard"]));
+    assert.ok(messages[0]!.content.includes(reviewGuidelines));
+    assert.match(messages[0]!.content, /### FINDING/);
+    const user = messages[1]!.content;
+    assert.match(user, /Mode: REVIEW/);
+    assert.match(user, /2\| Existing normalize\(\) returns text/);
+    assert.match(user, /3\| We will add queue\.ts/);
+    assert.ok(user.includes(source));
+    assert.ok(!messages.some(m => m.content.includes(unselected)));
+    const limits = sentContext(user);
+    assert.equal(limits.contextNotes.length, 2);
+    assert.match(limits.contextNotes.join("\n"), /size budget: huge\.ts/);
+    assert.match(limits.contextNotes.join("\n"), /refused: not-file\.ts/);
+    assert.equal(limits.currentHash, sha256(document));
+    assert.equal(await fs.readFile(path.join(f.root, "private.ts"), "utf8"), unselected);
+    await assert.rejects(fs.stat(path.join(f.root, "queue.ts")), { code: "ENOENT" });
+    assert.equal(f.store.listStages(run.id)[0]!.standard, "implementation-readiness-standard");
+    if (engineKind === "bb") {
+      assert.equal(f.endpoint.requests.length, 0);
+      assert.equal(bb.launches[0]!.environmentId, "env");
+    } else assert.equal(f.endpoint.requests[0]!.tools, undefined);
+  });
+}
 
 test("human decisions reach automatic and fresh rounds without suppressing new findings", async (t) => {
   const f = await setup([{ content: FINDING("Restore policy") + FINDING("Wording") + FINDING("Fix") },
@@ -1026,11 +1073,13 @@ for (const terminal of ["failed", "cancelled"] as const) {
 /** Fake BB reviewer: records each worker launch, honors a gate on the first one. */
 function fakeBb(replies: (string | GoldfishResult)[], firstGate?: Promise<void>) {
   const launches: { provider: string | null; model: string | null; environmentId: string | null }[] = [];
+  const requests: GoldfishMessage[][] = [];
   const waiters: { n: number; resolve: () => void }[] = [];
   const reviewer: ReviewEngine = {
     engine: "bb",
     status: async () => ({ engine: "bb", ready: true, reason: null, model: null, endpoint: null }),
-    complete: async (_messages, _signal, call: ReviewerCall) => {
+    complete: async (messages, _signal, call: ReviewerCall) => {
+      requests.push(messages);
       launches.push({ provider: call.provider, model: call.model, environmentId: call.environmentId });
       for (const w of waiters.filter((w) => launches.length >= w.n)) w.resolve();
       if (launches.length === 1 && firstGate) await firstGate;
@@ -1044,7 +1093,7 @@ function fakeBb(replies: (string | GoldfishResult)[], firstGate?: Promise<void>)
     waiters.push({ n, resolve });
     return promise;
   };
-  return { launches, started, reviewer: () => reviewer };
+  return { launches, requests, started, reviewer: () => reviewer };
 }
 
 test("revoking BB consent mid-run fails the next stage with no fallback and pins intact", async () => {

@@ -17,6 +17,7 @@ import zoomOutStandard from "../upstream/document_standards/zoom-out-standard.md
 import type { DecisionKind, FindingState, LensId, PresetId, Severity, StandardId } from "./contract.ts";
 import reviewGuidelines from "./review-guidelines.md" with { type: "text" };
 import comprehensionReview from "./comprehension.md" with { type: "text" };
+import codebaseDetailsReview from "./codebase-details.md" with { type: "text" };
 import { z } from "zod";
 import { paraphraseSchema, type Paraphrase, type ReportFormat } from "./contract.ts";
 
@@ -150,7 +151,9 @@ export function stageMessages(args: {
   const { plan, mode, specPath, specContent, context, earlierReports } = args;
   const system = plan.reportFormat === "comprehension_v1"
     ? [comprehensionReview, reviewGuidelines, COMPREHENSION_FORMAT].join("\n")
-    : [PERSONAS[plan.lens], "\n## Document standard\n", plan.standard === "none" ? "" : STANDARDS[plan.standard], reviewGuidelines, FORMAT].join("\n");
+    : [PERSONAS[plan.lens], "\n## Document standard\n", plan.standard === "none" ? "" : STANDARDS[plan.standard],
+      ...(plan.lens === "codebase_details" && mode === "REVIEW" ? [codebaseDetailsReview] : []),
+      reviewGuidelines, FORMAT].join("\n");
   const numbered = specContent
     .split("\n")
     .map((line, i) => `${String(i + 1).padStart(4, " ")}| ${line}`)

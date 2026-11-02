@@ -21,7 +21,7 @@ import type {
   Stage,
   StandardId,
 } from "./contract.ts";
-import { checkoutSchema, reviewerSnapshotSchema } from "./contract.ts";
+import { checkoutSchema, paraphraseSchema, reviewerSnapshotSchema } from "./contract.ts";
 
 // Append-only. Never edit or reorder shipped statements.
 export const MIGRATIONS: string[] = [
@@ -162,6 +162,8 @@ export const MIGRATIONS: string[] = [
   DROP TABLE specs;
   ALTER TABLE specs_with_checkouts RENAME TO specs;`,
   `ALTER TABLE proposals ADD COLUMN checkout_key TEXT;`,
+  `ALTER TABLE stages ADD COLUMN report_format TEXT NOT NULL DEFAULT 'findings_v1';
+   ALTER TABLE stages ADD COLUMN paraphrase_json TEXT;`,
 ];
 
 export const newId = (): string => randomUUID().replace(/-/g, "").slice(0, 24);
@@ -203,6 +205,8 @@ type StageRow = {
   error: string | null;
   report_path: string | null;
   raw_report: string | null;
+  report_format: NonNullable<Stage["reportFormat"]>;
+  paraphrase_json: string | null;
   started_at: number | null;
   finished_at: number | null;
 };
@@ -340,7 +344,10 @@ const stageFromRow = (r: StageRow): Stage => ({
   round: r.round,
   position: r.position,
   lens: r.lens as LensId,
-  standard: r.standard as StandardId,
+  standard: r.standard as Stage["standard"],
+  reportFormat: r.report_format,
+  paraphrase: r.paraphrase_json ? paraphraseSchema.parse(JSON.parse(r.paraphrase_json)) : null,
+  rawReport: r.report_format === "comprehension_v1" && (r.error || r.state === "failed" || r.state === "cancelled") ? r.raw_report : null,
   state: r.state as Stage["state"],
   engine: r.engine as import("./contract.ts").ReviewerEngine,
   provider: r.provider,
@@ -502,11 +509,11 @@ export class Store {
 
   insertStage(stage: Stage): void {
     this.db.prepare(
-      `INSERT INTO stages (id, run_id, round, position, lens, standard, state, engine, provider, model, worker_thread_id, error, report_path, raw_report, started_at, finished_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO stages (id, run_id, round, position, lens, standard, state, engine, provider, model, worker_thread_id, error, report_path, raw_report, started_at, finished_at, report_format, paraphrase_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(stage.id, stage.runId, stage.round, stage.position, stage.lens, stage.standard, stage.state,
       stage.engine, stage.provider, stage.model, stage.workerThreadId, stage.error, stage.reportPath,
-      null, stage.startedAt, stage.finishedAt);
+      null, stage.startedAt, stage.finishedAt, stage.reportFormat ?? "findings_v1", stage.paraphrase ? JSON.stringify(stage.paraphrase) : null);
   }
 
   listStages(runId: string): Stage[] {
@@ -517,13 +524,14 @@ export class Store {
     return this.db.prepare<[string], StageRow>("SELECT s.* FROM stages s JOIN runs r ON r.id = s.run_id WHERE r.spec_id = ? ORDER BY r.created_at DESC, s.position").all(specId).map(stageFromRow);
   }
 
-  updateStage(stageId: string, patch: Partial<Pick<Stage, "state" | "provider" | "model" | "workerThreadId" | "error" | "reportPath" | "startedAt" | "finishedAt">> & { rawReport?: string }): void {
-    const map = { state: "state", provider: "provider", model: "model", workerThreadId: "worker_thread_id", error: "error", reportPath: "report_path", startedAt: "started_at", finishedAt: "finished_at", rawReport: "raw_report" };
+  updateStage(stageId: string, patch: Partial<Pick<Stage, "state" | "provider" | "model" | "workerThreadId" | "error" | "reportPath" | "startedAt" | "finishedAt" | "paraphrase">> & { rawReport?: string }): void {
+    const map = { state: "state", provider: "provider", model: "model", workerThreadId: "worker_thread_id", error: "error", reportPath: "report_path", startedAt: "started_at", finishedAt: "finished_at", rawReport: "raw_report", paraphrase: "paraphrase_json" };
     const sets: string[] = [];
     const values: unknown[] = [];
     for (const [key, column] of Object.entries(map)) if (key in patch) {
       sets.push(`${column} = ?`);
-      values.push((patch as Record<string, unknown>)[key]);
+      const value = (patch as Record<string, unknown>)[key];
+      values.push(key === "paraphrase" && value != null ? JSON.stringify(value) : value);
     }
     if (sets.length === 0) return;
     values.push(stageId);

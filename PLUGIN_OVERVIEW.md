@@ -20,7 +20,7 @@ The model separates three roles:
   decisions behind the spec. It can contest a finding with a rationale or
   propose a revised document, but it never edits the spec directly.
 - **Goldfish** — the fresh-context reviewer. Each review stage receives the
-  reviewer persona, document standard, shared review guidelines, numbered spec,
+  reviewer persona, applicable document standard, shared review guidelines, numbered spec,
   selected context files and bounded historical human decisions/context
   limitations from that spec. It carries none of the
   conversation's history. In the Advanced endpoint mode those prompt inputs

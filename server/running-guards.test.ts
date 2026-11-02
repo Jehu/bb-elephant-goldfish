@@ -130,7 +130,8 @@ test("proposing with no findings is refused without side effects", async () => {
 });
 
 test("applying a proposal whose findings belong to a running review is refused without side effects", async () => {
-  const { root, engine, spec, store } = await setup([{ content: FINDING("Gap A") }]);
+  const { root, engine, spec, store } = await setup([{ content: FINDING("Gap A") },
+    { content: JSON.stringify({ paraphrase: { proposal: "Change the spec.", existingSystem: "The current spec is preliminary." }, findings: [] }) }]);
   const run = await engine.startRun(spec.id, { preset: "feature_spec", context: [], maxRounds: 3, threadId: null });
   await engine.settle();
   assert.equal(store.getRun(run.id)!.state, "awaiting_decisions");

@@ -6,7 +6,7 @@ import path from "node:path";
 import { test } from "node:test";
 import Database from "better-sqlite3";
 import { Engine, type ReviewEngine, type ReviewerCall, type ReviewerSnapshot } from "./engine.ts";
-import { GoldfishClient } from "./goldfish.ts";
+import { GoldfishClient, type GoldfishResult } from "./goldfish.ts";
 import { MIGRATIONS, Store } from "./store.ts";
 import { sha256 } from "./workspace.ts";
 import { reviewGuidelines, type ReviewContext } from "./prompts.ts";
@@ -15,7 +15,7 @@ import { reviewGuidelines, type ReviewContext } from "./prompts.ts";
  * `gate`: the reply waits until the test opens it (and still honors abort).
  * `hang`: the reply waits until the request is aborted.
  */
-type Reply = { content?: string; status?: number; body?: string; toolCall?: boolean; hang?: boolean; gate?: Promise<void> };
+type Reply = { content?: string; status?: number; body?: string; toolCall?: boolean; hang?: boolean; gate?: Promise<void>; truncated?: boolean; timeout?: AbortController };
 
 /**
  * OpenAI-compatible fake: answers queued replies and records each request body.
@@ -29,6 +29,7 @@ function fakeEndpoint(replies: Reply[]) {
     requests.push(JSON.parse(String(init?.body)));
     for (const w of waiters.filter((w) => requests.length >= w.n)) w.resolve();
     const reply = replies.shift() ?? { content: "NO FINDINGS" };
+    if (reply.timeout) { reply.timeout.abort(); throw new DOMException("controlled timeout", "TimeoutError"); }
     if (reply.hang || reply.gate) {
       const aborted = Promise.withResolvers<never>();
       init?.signal?.addEventListener("abort", () => aborted.reject(new DOMException("aborted", "AbortError")));
@@ -40,7 +41,7 @@ function fakeEndpoint(replies: Reply[]) {
       ? { content: null, tool_calls: [{ id: "t", type: "function", function: { name: "write_file", arguments: "{}" } }] }
       : { content: reply.content };
     return new Response(
-      JSON.stringify({ model: "fake-model", choices: [{ message, finish_reason: reply.toolCall ? "tool_calls" : "stop" }] }),
+      JSON.stringify({ model: "fake-model", choices: [{ message, finish_reason: reply.toolCall ? "tool_calls" : reply.truncated ? "length" : "stop" }] }),
       { status: 200 },
     );
   }) as typeof fetch;
@@ -53,6 +54,101 @@ function fakeEndpoint(replies: Reply[]) {
 }
 
 const FINDING = (title: string, severity = "major") => `### FINDING\nseverity: ${severity}\nlines: 1-2\ntitle: ${title}\nBecause reasons.\n`;
+const PARAPHRASE = { proposal: "Introduce a queue.", existingSystem: "Requests currently run inline." };
+const COMPREHENSION = JSON.stringify({ paraphrase: PARAPHRASE, findings: [] });
+
+test("a timed-out endpoint comprehension stage remains a limit without artificial findings", async (t) => {
+  const timeout = new AbortController();
+  t.mock.method(AbortSignal, "timeout", () => timeout.signal);
+  const f = await setup([{ content: "NO FINDINGS" }, { timeout }]);
+  t.after(async () => { f.engine.dispose(); await f.engine.settle(); f.db.close(); await fs.rm(f.root, { recursive: true, force: true }); });
+  const run = await f.review("feature_spec");
+  assert.equal(run.state, "limit_reached");
+  assert.match(run.stateReason!, /no answer within/);
+  const stage = f.store.listStages(run.id)[1]!;
+  assert.equal(stage.state, "failed");
+  assert.equal(stage.paraphrase, null);
+  assert.deepEqual(f.store.listFindingsForRun(run.id), []);
+});
+
+for (const engineKind of ["goldfish", "bb"] as const) {
+  for (const scenario of [
+    { name: "no findings", text: COMPREHENSION, state: "completed", findings: 0 },
+    { name: "real finding", text: JSON.stringify({ paraphrase: PARAPHRASE, findings: [
+      { severity: "major", title: "Ownership", body: "Ownership is unclear.", lineStart: null, lineEnd: null },
+    ] }), state: "awaiting_decisions", findings: 1 },
+    { name: "missing paraphrase", text: '{"findings":[]}', state: "failed", findings: 0 },
+    { name: "legacy no findings is invalid", text: "NO FINDINGS", state: "failed", findings: 0 },
+    { name: "blank output", text: "", state: "failed", findings: 0 },
+    { name: "valid text at output limit", text: COMPREHENSION, truncated: true, state: "limit_reached", findings: 0 },
+    { name: "truncated JSON", text: '{"paraphrase":{"proposal":"partial', truncated: true, state: "limit_reached", findings: 0 },
+    { name: "rate limit", text: "", status: 429, state: "limit_reached", findings: 0 },
+  ]) {
+    test(`${engineKind} comprehension: ${scenario.name}`, async (t) => {
+      const reply: GoldfishResult = scenario.status
+        ? { ok: false, kind: "limit", error: "rate limit" }
+        : { ok: true, text: scenario.text, model: "test", truncated: scenario.truncated ?? false };
+      const bb = fakeBb(["NO FINDINGS", reply]);
+      const f = await setup([{ content: "NO FINDINGS" }, { content: scenario.text, truncated: scenario.truncated, status: scenario.status }],
+        engineKind === "bb" ? { bb: bb.reviewer } : {});
+      t.after(async () => { f.engine.dispose(); await f.engine.settle(); f.db.close(); await fs.rm(f.root, { recursive: true, force: true }); });
+      f.store.grantReviewerConsent();
+      const run = await f.review("feature_spec");
+      assert.equal(run.state, scenario.state);
+      assert.equal(f.store.listFindingsForRun(run.id).length, scenario.findings);
+      const stage = f.store.listStages(run.id)[1]!;
+      if (scenario.truncated || scenario.state === "failed") {
+        assert.equal(stage.state, "failed");
+        if (scenario.text) assert.equal(stage.rawReport, scenario.text);
+      }
+      if (scenario.text === COMPREHENSION) assert.deepEqual(stage.paraphrase, PARAPHRASE);
+      if (scenario.truncated) assert.match(run.stateReason!, /output limit/);
+      if (stage.reportPath) assert.ok((await fs.readFile(path.join(f.root, stage.reportPath), "utf8")).length > 0);
+      if (engineKind === "bb") assert.equal(f.endpoint.requests.length, 0);
+    });
+  }
+}
+
+test("a comprehension result received during cancellation retains raw text without reopening the stage", async (t) => {
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let calls = 0;
+  const reviewer: ReviewEngine = { engine: "bb", status: async () => ({ engine: "bb", ready: true, reason: null, model: null, endpoint: null }),
+    complete: async () => {
+      if (++calls === 1) return { ok: true, text: "NO FINDINGS", model: "test", truncated: false };
+      entered.resolve(); await release.promise;
+      return { ok: true, text: COMPREHENSION, model: "test", truncated: false };
+    } };
+  const f = await setup([], { bb: () => reviewer });
+  t.after(async () => { release.resolve(); f.engine.dispose(); await f.engine.settle(); f.db.close(); await fs.rm(f.root, { recursive: true, force: true }); });
+  f.store.grantReviewerConsent();
+  const run = await f.engine.startRun(f.spec.id, { preset: "full", context: [], maxRounds: 3, threadId: null });
+  await entered.promise;
+  f.engine.cancelRun(run.id); release.resolve(); await f.engine.settle();
+  assert.equal(f.store.getRun(run.id)!.state, "cancelled");
+  const stage = f.store.listStages(run.id)[1]!;
+  assert.equal(stage.state, "cancelled");
+  assert.equal(stage.rawReport, COMPREHENSION);
+  assert.deepEqual(f.store.listFindingsForRun(run.id), []);
+});
+
+test("comprehension survives the full engine/report path without artificial findings", async (t) => {
+  const f = await setup([{ content: "NO FINDINGS" }, { content: COMPREHENSION }]);
+  t.after(async () => { f.engine.dispose(); await f.engine.settle(); f.db.close(); await fs.rm(f.root, { recursive: true, force: true }); });
+  const run = await f.review("feature_spec");
+  assert.equal(run.state, "completed");
+  assert.deepEqual(f.store.listFindingsForRun(run.id), []);
+  const stage = f.store.listStages(run.id)[1]!;
+  assert.deepEqual(stage.paraphrase, PARAPHRASE);
+  assert.equal(stage.reportFormat, "comprehension_v1");
+  assert.equal(stage.standard, "none");
+  const report = await fs.readFile(path.join(f.root, stage.reportPath!), "utf8");
+  assert.match(report, /## What this proposes/);
+  assert.ok(report.includes(PARAPHRASE.existingSystem));
+  assert.ok(f.endpoint.requests[3]!.messages[1]!.content.includes(PARAPHRASE.proposal));
+  assert.ok(f.endpoint.requests[3]!.messages[1]!.content.includes(PARAPHRASE.existingSystem));
+  assert.match(await fs.readFile(path.join(f.root, run.reportDir, "goldfish_review_report.md"), "utf8"), /Comprehension/);
+});
 
 async function setup(replies: Reply[], options: { configured?: boolean; bb?: () => ReviewEngine; currentReviewer?: ((threadId: string | null) => Promise<ReviewerSnapshot>) | null; config?: () => Promise<{ baseUrl: string; model: string; apiKey: string; timeoutMs: number } | null>; threadProject?: (threadId: string) => Promise<string | null> } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "egm-eng-")));
@@ -690,7 +786,7 @@ test("failed reconciliation transition retains intent without fixing findings or
 });
 
 test("an ad hoc proposal applies without synthetic findings and starts a default fresh review", async () => {
-  const { root, engine, spec, store, endpoint } = await setup([]);
+  const { root, engine, spec, store, endpoint } = await setup([{ content: "NO FINDINGS" }, { content: COMPREHENSION }]);
   const content = "# Spec\n\nAd hoc change.\n";
   const proposal = await engine.propose(spec.id, [], content, "improve the spec", "thr");
   assert.equal(proposal.runId, null);
@@ -928,7 +1024,7 @@ for (const terminal of ["failed", "cancelled"] as const) {
 }
 
 /** Fake BB reviewer: records each worker launch, honors a gate on the first one. */
-function fakeBb(replies: string[], firstGate?: Promise<void>) {
+function fakeBb(replies: (string | GoldfishResult)[], firstGate?: Promise<void>) {
   const launches: { provider: string | null; model: string | null; environmentId: string | null }[] = [];
   const waiters: { n: number; resolve: () => void }[] = [];
   const reviewer: ReviewEngine = {
@@ -938,7 +1034,8 @@ function fakeBb(replies: string[], firstGate?: Promise<void>) {
       launches.push({ provider: call.provider, model: call.model, environmentId: call.environmentId });
       for (const w of waiters.filter((w) => launches.length >= w.n)) w.resolve();
       if (launches.length === 1 && firstGate) await firstGate;
-      return { ok: true, text: replies.shift() ?? "NO FINDINGS", model: call.model ?? "bb-worker", truncated: false };
+      const reply = replies.shift() ?? "NO FINDINGS";
+      return typeof reply === "string" ? { ok: true, text: reply, model: call.model ?? "bb-worker", truncated: false } : reply;
     },
   };
   const started = (n: number): Promise<void> => {
@@ -1161,7 +1258,7 @@ test("a first-ever ad hoc apply pins the configured goldfish reviewer", async ()
 });
 
 test("a first-ever ad hoc apply with BB selected launches BB only with consent", async () => {
-  const bb = fakeBb(["NO FINDINGS"]);
+  const bb = fakeBb(["NO FINDINGS", COMPREHENSION]);
   const currentReviewer = async () => ({ engine: "bb" as const, provider: null, model: null, environmentId: null });
   const refused = await setup([], { bb: bb.reviewer, currentReviewer });
   const proposal = await refused.engine.propose(refused.spec.id, [], "# Spec\n\nAd hoc.\n", "change", "thr");

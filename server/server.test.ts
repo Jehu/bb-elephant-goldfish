@@ -11,6 +11,7 @@ import { createFakePluginHost, makePluginAgentConfigurationContext } from "@get-
 import plugin from "../server.ts";
 import { Store } from "./store.ts";
 import { reviewGuidelines } from "./prompts.ts";
+import type { Stage } from "./contract.ts";
 
 test("SDK reload and fresh session resolution retain the shared instructions", async () => {
   const host = createFakePluginHost({ pluginId: "elephant-goldfish",
@@ -199,6 +200,7 @@ test("a registered ad hoc RPC apply launches the configured Goldfish engine, nev
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "egm-rpc-"));
   const db = new Database(":memory:");
   const chats: { model: string }[] = [];
+  const paraphrase = { proposal: "Update the spec.", existingSystem: "The spec describes the current workflow." };
   const stub = http.createServer((req, res) => {
     const reply = (body: unknown) => {
       res.writeHead(200, { "content-type": "application/json" });
@@ -209,7 +211,8 @@ test("a registered ad hoc RPC apply launches the configured Goldfish engine, nev
     req.on("data", (chunk) => (raw += chunk));
     req.on("end", () => {
       chats.push(JSON.parse(raw));
-      reply({ model: "stub-model", choices: [{ message: { content: "NO FINDINGS" }, finish_reason: "stop" }] });
+      reply({ model: "stub-model", choices: [{ message: { content: chats.length === 2
+        ? JSON.stringify({ paraphrase, findings: [] }) : "NO FINDINGS" }, finish_reason: "stop" }] });
     });
   });
   const listening = Promise.withResolvers<void>();
@@ -262,8 +265,15 @@ test("a registered ad hoc RPC apply launches the configured Goldfish engine, nev
     assert.equal(run.model, "stub-model");
     assert.equal(run.provider, baseUrl);
     assert.equal(run.state, "completed");
+    const detail = await rpc.spec_detail!({ specId: "spec-a" }) as { stages: Stage[] };
+    const status = JSON.parse(await tools.get("egm_review_status")!({ specId: "spec-a" }, { projectId: "a", threadId: "thread-a" }) as string) as { stages: Stage[] };
+    assert.deepEqual(detail.stages[1]!.paraphrase, paraphrase);
+    assert.deepEqual(status.stages, detail.stages);
+    assert.equal(store.listFindingsForRun(run.id).length, 0);
+    const denied = await tools.get("egm_review_status")!({ specId: "spec-a" }, { projectId: "other", threadId: "thread-a" });
+    assert.deepEqual(denied, { content: [{ type: "text", text: "Unknown spec." }], isError: true });
     assert.ok(chats.length >= 1, "the stub endpoint served the review");
-    assert.deepEqual(threadCalls, ["thread-a"], "only the invoking thread's checkout was consulted; no worker was launched");
+    assert.deepEqual(threadCalls, ["thread-a", "thread-a"], "proposal and status use only the invoking thread's checkout; no worker was launched");
   } finally {
     db.close();
     await fs.rm(root, { recursive: true, force: true });

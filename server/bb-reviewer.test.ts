@@ -2,11 +2,34 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { BbReviewer } from "./bb-reviewer.ts";
-import { reviewGuidelines, stageMessages } from "./prompts.ts";
+import { presetStages, reviewGuidelines, stageMessages } from "./prompts.ts";
 
 type TurnCompletedData = { status: "completed" | "failed" | "interrupted"; error?: { message: string } };
 type EventRow = { type: string; data: TurnCompletedData };
 type SpawnRequest = { projectId: string; environment: { type: string; environmentId: string }; input: { type: string; text: string }[] };
+
+test("BB passes the comprehension prompt and structured response unchanged", async () => {
+  const output = JSON.stringify({ paraphrase: { proposal: "Use a queue.", existingSystem: "Calls run inline." }, findings: [] });
+  const { bb, calls } = bbFixture({ type: "turn/completed", data: { status: "completed" } }, output);
+  const messages = stageMessages({ plan: presetStages("full", undefined, undefined)[1]!, mode: "REVIEW",
+    specPath: "spec.md", specContent: "# Queue", context: [], earlierReports: [] });
+  const result = await new BbReviewer(bb, async () => 1000).complete(messages, new AbortController().signal,
+    { projectId: "p", environmentId: "env", provider: null, model: null });
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.text, output);
+  assert.equal(calls.spawn[0]!.input[0]!.text, messages.map(m => `${m.role.toUpperCase()}:\n${m.content}`).join("\n\n"));
+  assert.doesNotMatch(messages[0]!.content, /## Document standard/);
+});
+
+test("a BB timeout is a limit with no invented report and cleans up its worker", async () => {
+  const { bb, calls } = bbFixture(null);
+  const result = await new BbReviewer(bb, async () => 1000).complete([], new AbortController().signal,
+    { projectId: "p", environmentId: "env", provider: null, model: null });
+  assert.deepEqual(result, { ok: false, kind: "limit", error: "BB worker timed out" });
+  assert.deepEqual(calls.output, []);
+  assert.deepEqual(calls.stop, ["worker-1"]);
+  assert.deepEqual(calls.archive, ["worker-1"]);
+});
 
 function bbFixture(event: EventRow | null, output = "NO FINDINGS") {
   const calls: { spawn: SpawnRequest[]; stop: string[]; archive: string[]; output: string[] } = { spawn: [], stop: [], archive: [], output: [] };

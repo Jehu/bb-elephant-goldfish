@@ -20,7 +20,7 @@ with current UI screenshots under [screenshots/](screenshots/).
   tools and write according to BB's permission mode, so this mode requires
   explicit installation-wide consent before the first launch.
 - **Advanced endpoint**: a fresh, tool-less OpenAI-compatible model call. It
-  receives the reviewer persona, document standard, shared guidelines, numbered
+  receives the reviewer persona, applicable document standard, shared guidelines, numbered
   spec, chosen context files and bounded historical decisions/context limitations;
   it cannot read other files, run commands or change
   anything. Tool-call responses are rejected.
@@ -137,6 +137,20 @@ rendered.
    If the file changed independently before re-review, start a fresh review. At the round
    limit the changed document is explicitly **not re-reviewed**. Cancellation,
    failure, partial output and stale versions are visible non-success states.
+
+### Comprehension reports
+
+New full and feature-spec reviews include a Comprehension report that restates
+the proposal and the existing system as described by the document. It uses no
+reimplementation standard. Read it under the review history, independently of
+findings and their filters, including when there are no findings. The Elephant
+gets the same two-part text through `egm_review_status` in `stages[].paraphrase`.
+Stage Markdown reports retain the full account and findings in the spec's checkout.
+
+Missing or invalid required output fails the stage; truncated output remains an
+output-limit result. The available original text and detailed reason remain
+visible. Neither the paraphrase nor an output-format error becomes a finding.
+Brainstorm, Custom and previously stored stages keep their original contracts.
 
 ### Proportionate review guidelines
 

@@ -1,7 +1,21 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { LENS_IDS, PRESET_IDS, STANDARD_IDS } from "./contract.ts";
-import { parseFindings, presetStages, reviewGuidelines, stageMessages } from "./prompts.ts";
+import { parseComprehension, parseFindings, presetStages, reviewGuidelines, stageMessages } from "./prompts.ts";
+
+test("only new full/feature-spec comprehension stages omit the document standard", () => {
+  for (const preset of ["full", "feature_spec"] as const) {
+    const stage = presetStages(preset, undefined, undefined)[1]!;
+    assert.equal(stage.lens, "comprehension");
+    assert.equal(stage.standard, "none");
+    assert.equal(stage.reportFormat, "comprehension_v1");
+  }
+  for (const preset of ["brainstorm", "custom"] as const) {
+    const stage = presetStages(preset, ["comprehension"], "heilmeier-standard").find(s => s.lens === "comprehension")!;
+    assert.equal(stage.standard, "heilmeier-standard");
+    assert.notEqual(stage.reportFormat, "comprehension_v1");
+  }
+});
 
 test("every preset, lens, standard and mode receives the complete shared guidelines", () => {
   assert.ok(reviewGuidelines.length < 4096, "SDK instructions must not be truncated");
@@ -13,8 +27,14 @@ test("every preset, lens, standard and mode receives the complete shared guideli
             context: [], earlierReports: [] });
           assert.deepEqual(messages.map((m) => m.role), ["system", "user"]);
           assert.ok(messages[0]!.content.includes(reviewGuidelines));
-          assert.ok(messages[0]!.content.indexOf(reviewGuidelines) > messages[0]!.content.indexOf("## Document standard"));
-          assert.match(messages[0]!.content, /### FINDING/);
+          if (plan.reportFormat === "comprehension_v1") {
+            assert.doesNotMatch(messages[0]!.content, /## Document standard|### FINDING|Reimplementation/i);
+            assert.match(messages[0]!.content, /"paraphrase"/);
+            assert.match(messages[0]!.content, /"findings"/);
+          } else {
+            assert.ok(messages[0]!.content.indexOf(reviewGuidelines) > messages[0]!.content.indexOf("## Document standard"));
+            assert.match(messages[0]!.content, /### FINDING/);
+          }
           assert.match(messages[1]!.content, new RegExp(`Mode: ${mode}`));
           assert.match(messages[1]!.content, /1\| # Spec\n\s*2\| Text/);
         }
@@ -23,6 +43,31 @@ test("every preset, lens, standard and mode receives the complete shared guideli
   }
   assert.deepEqual(parseFindings("NO FINDINGS"), []);
   assert.equal(parseFindings("### FINDING\nseverity: major\nlines: 2-2\ntitle: Risk\nDetails")?.[0]?.title, "Risk");
+});
+
+test("comprehension validates a complete paraphrase separately from real findings", () => {
+  const paraphrase = { proposal: "Introduce a queue.", existingSystem: "Requests run inline." };
+  const finding = { severity: "major", title: "Queue ownership", body: "Ownership is ambiguous.", lineStart: 2, lineEnd: 3 };
+  const empty = parseComprehension(JSON.stringify({ paraphrase, findings: [] }));
+  assert.deepEqual(empty, { ok: true, paraphrase, findings: [] });
+  const parsed = parseComprehension(JSON.stringify({ paraphrase, findings: [finding] }));
+  assert.deepEqual(parsed, { ok: true, paraphrase, findings: [{ ...finding, rawSeverity: "major" }] });
+  for (const invalid of ["", "NO FINDINGS", "{", JSON.stringify({ findings: [] }),
+    JSON.stringify({ paraphrase }), JSON.stringify({ paraphrase: { ...paraphrase, proposal: "  " }, findings: [] }),
+    JSON.stringify({ paraphrase, findings: [{ ...finding, severity: "unknown" }] }),
+    JSON.stringify({ paraphrase, findings: [{ ...finding, lineStart: 4, lineEnd: 2 }] }),
+    JSON.stringify({ paraphrase, findings: [{ ...finding, lineStart: null }] }),
+    JSON.stringify({ paraphrase: { proposal: "Queue" }, findings: [] })]) {
+    assert.equal(parseComprehension(invalid).ok, false, invalid);
+  }
+});
+
+test("a legacy comprehension stage keeps its original prompt and finding parser", () => {
+  const messages = stageMessages({ plan: { lens: "comprehension", standard: "re-implementation-standard" },
+    mode: "REVIEW", specPath: "s.md", specContent: "# Spec", context: [], earlierReports: [] });
+  assert.match(messages[0]!.content, /## Document standard/);
+  assert.match(messages[0]!.content, /### FINDING/);
+  assert.deepEqual(parseFindings("NO FINDINGS"), []);
 });
 
 // Fixed acceptance inputs, not assertions about a model's future judgment.

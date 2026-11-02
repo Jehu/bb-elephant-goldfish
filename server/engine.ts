@@ -27,7 +27,7 @@ import {
 import { unifiedDiff } from "./diff.ts";
 import { ENDPOINT_CHANGED, normalizeBaseUrl } from "./goldfish.ts";
 import type { GoldfishClient, GoldfishMessage, GoldfishResult } from "./goldfish.ts";
-import { parseFindings, presetStages, stageMessages, type ContextFile, type ReviewContext } from "./prompts.ts";
+import { comprehensionMarkdown, parseComprehension, parseFindings, presetStages, stageMessages, type ContextFile, type ReviewContext } from "./prompts.ts";
 import { checkoutKey, newId, type SpecRecord, type Store } from "./store.ts";
 import {
   compareAndReplace,
@@ -414,7 +414,7 @@ export class Engine {
         store.supersedePendingProposals(spec.id, run.id);
         plans.forEach((plan, position) =>
           store.insertStage({
-            id: newId(), runId, round, position, lens: plan.lens, standard: plan.standard,
+            id: newId(), runId, round, position, lens: plan.lens, standard: plan.standard, reportFormat: plan.reportFormat,
             state: "pending", engine: run.engine, provider: run.provider, model: run.model,
             workerThreadId: null, error: null, reportPath: null, startedAt: null, finishedAt: null,
           }),
@@ -522,7 +522,7 @@ export class Engine {
       store.updateStage(stage.id, { state: "running", startedAt: Date.now() });
       this.deps.changed(spec.projectId, spec.id);
       const messages = stageMessages({
-        plan: { lens: stage.lens, standard: stage.standard },
+        plan: { lens: stage.lens, standard: stage.standard, reportFormat: stage.reportFormat },
         mode: run.preset === "brainstorm" ? "BRAINSTORM" : "REVIEW",
         specPath: spec.path,
         specContent: file.content,
@@ -548,11 +548,19 @@ export class Engine {
         }
         return;
       }
+      const comprehension = stage.reportFormat === "comprehension_v1" ? parseComprehension(result.text) : null;
+      let reportError: string | null = null;
+      if (comprehension) {
+        if (result.truncated) reportError = "output limit reached; comprehension report is incomplete";
+        else if (!comprehension.ok) reportError = comprehension.error;
+      }
+      if (comprehension) store.updateStage(stage.id, { rawReport: result.text });
       if (signal.aborted) {
         store.updateStage(stage.id, { state: "cancelled", finishedAt: Date.now() });
         return;
       }
-      reports.push({ lens: stage.lens, text: result.text });
+      const reportText = comprehension?.ok ? comprehensionMarkdown(comprehension.paraphrase, comprehension.findings) : result.text;
+      reports.push({ lens: stage.lens, text: reportText });
       await this.root(spec);
       const reportPath = `${run.reportDir}/round-${run.round}/${String(stage.position + 1).padStart(2, "0")}-${stage.lens}.md`;
       const header = [
@@ -563,16 +571,17 @@ export class Engine {
         `- Standard: \`${stage.standard}\``,
         `- Model: \`${result.model}\`${run.engine === "bb" ? " (fresh BB worker; permissions are governed by BB)" : " (tool-less endpoint completion)"}`,
         result.truncated ? "- **The model stopped at its output limit; this report may be incomplete.**" : null,
+        reportError ? `- **${reportError}**` : null,
         "",
         "---",
         "",
       ].filter((line): line is string => line !== null);
-      await writeReport(root, reportPath, header.join("\n") + result.text + "\n");
+      await writeReport(root, reportPath, header.join("\n") + reportText + "\n");
       if (signal.aborted) {
-        store.updateStage(stage.id, { state: "cancelled", finishedAt: Date.now() });
+        store.updateStage(stage.id, { state: "cancelled", reportPath, finishedAt: Date.now() });
         return;
       }
-      const parsed = parseFindings(result.text);
+      const parsed = comprehension ? comprehension.ok ? comprehension.findings : [] : parseFindings(result.text);
       const now = Date.now();
       store.transaction(() => {
         const items = parsed ?? [{ severity: "unknown" as const, rawSeverity: "(unparsed)", title: `Unstructured ${stage.lens} report`, body: result.text, lineStart: null, lineEnd: null }];
@@ -585,11 +594,13 @@ export class Engine {
           }, spec.id);
         }
         store.updateStage(stage.id, {
-          state: "completed", provider: run.provider, model: result.model, reportPath, rawReport: result.text,
+          state: reportError ? "failed" : "completed", provider: run.provider, model: result.model, reportPath, rawReport: result.text,
           finishedAt: now,
-          ...(result.truncated ? { error: "output limit reached; report may be incomplete" } : {}),
+          ...(comprehension?.ok ? { paraphrase: comprehension.paraphrase } : {}),
+          ...(reportError ? { error: reportError } : result.truncated ? { error: "output limit reached; report may be incomplete" } : {}),
         });
       });
+      if (reportError && !failure) failure = { state: result.truncated ? "limit_reached" : "failed", reason: `${stage.lens} stage: ${reportError}` };
       if (result.truncated && !failure) {
         failure = { state: "limit_reached", reason: `${stage.lens} stage stopped at the model's output limit` };
       }
@@ -645,6 +656,11 @@ export class Engine {
       `- Reviewed version: \`${run.targetHash}\``,
       `- State: **${run.state}**${run.stateReason ? ` (${run.stateReason})` : ""}`,
       "",
+      ...store.listStages(run.id).filter(s => s.reportFormat === "comprehension_v1").flatMap(s => [
+        "## Comprehension report", "",
+        `Stage ${s.position + 1}: ${s.state}${s.error ? ` — ${s.error}` : ""}`,
+        s.reportPath ? `Report: \`${s.reportPath}\`` : "No report file is available.", "",
+      ]),
       "| Severity | Lens | Finding | State | Decision |",
       "|---|---|---|---|---|",
       ...findings.map(
@@ -880,6 +896,11 @@ export class Engine {
     });
   }
 
+  private customStandard(standard: StandardId | "none" | undefined): StandardId | undefined {
+    if (standard === "none") throw new EngineError("Custom reviews require a document standard.");
+    return standard;
+  }
+
   private recordAdHocReview(spec: SpecRecord, proposal: Proposal, snapshot?: ReviewerSnapshot): void {
     const { store } = this.deps;
     const latest = store.listRuns(spec.id)[0];
@@ -887,7 +908,7 @@ export class Engine {
     const options: StartOptions = latest ? {
       preset: latest.preset, context: latest.context, maxRounds: latest.maxRounds, threadId: latest.threadId,
       reviewer: { engine: latest.engine, provider: latest.provider, model: latest.model, environmentId: latest.environmentId ?? null },
-      ...(latest.preset === "custom" ? { lenses: stages.map((stage) => stage.lens), standard: stages[0]?.standard } : {}),
+      ...(latest.preset === "custom" ? { lenses: stages.map((stage) => stage.lens), standard: this.customStandard(stages[0]?.standard) } : {}),
     } : { preset: "full", context: [], maxRounds: 3, threadId: proposal.author || null, reviewer: snapshot };
     store.deleteOtherPendingAdHocReviewTasks(spec.id, proposal.id);
     store.putAdHocReviewTask({ proposalId: proposal.id, targetHash: proposal.resultHash, options, createdAt: Date.now() });
@@ -990,7 +1011,7 @@ export class Engine {
             reviewer: { engine: run.engine, provider: run.provider, model: run.model, environmentId: run.environmentId ?? null },
             ...(run.preset === "custom" ? {
               lenses: store.listStages(runId).map((stage) => stage.lens),
-              standard: store.listStages(runId)[0]?.standard,
+              standard: this.customStandard(store.listStages(runId)[0]?.standard),
             } : {}),
           },
           runId,

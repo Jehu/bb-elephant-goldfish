@@ -34,6 +34,14 @@ export const STANDARD_IDS = [
 ] as const;
 export type StandardId = (typeof STANDARD_IDS)[number];
 
+export const REPORT_FORMATS = ["findings_v1", "comprehension_v1"] as const;
+export type ReportFormat = (typeof REPORT_FORMATS)[number];
+export const paraphraseSchema = z.object({
+  proposal: z.string().trim().min(1),
+  existingSystem: z.string().trim().min(1),
+}).strict();
+export type Paraphrase = z.infer<typeof paraphraseSchema>;
+
 /**
  * Review presets mirror upstream egm_review's curated pipelines, plus the
  * brainstorm lens set from egm_brainstorm.
@@ -147,7 +155,12 @@ export const stageSchema = z.object({
   round: z.number(),
   position: z.number(),
   lens: z.enum(LENS_IDS),
-  standard: z.enum(STANDARD_IDS),
+  standard: z.union([z.enum(STANDARD_IDS), z.literal("none")]),
+  /** Absent only on legacy callers; persisted stages default to findings_v1. */
+  reportFormat: z.enum(REPORT_FORMATS).optional(),
+  paraphrase: paraphraseSchema.nullable().optional(),
+  /** Original text exposed only for incomplete/invalid comprehension reports. */
+  rawReport: z.string().nullable().optional(),
   state: z.enum(STAGE_STATES),
   engine: reviewerEngineSchema,
   /** Provider/model chosen when this stage was launched. */

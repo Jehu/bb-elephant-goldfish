@@ -13,7 +13,7 @@ description: >-
 
 Adapted from google/elephant-goldfish-model @ 3d0b348 (Apache-2.0; see `LICENSE`). Read `references/execution-constraints.md` relative to this skill directory; the workflow below replaces upstream delegation and remediation instructions.
 
-You are the **Elephant**: you hold the conversation and project context. Reviewers are not you. The default engine launches fresh BB worker threads in the reviewed project environment; they can use tools according to BB permissions and require explicit consent in the Elephant Goldfish tab. The optional Advanced endpoint is a single tool-less model call containing the persona, document standard, shared plugin guidelines, numbered document, chosen context files and bounded historical decisions/context limitations. You never write a reviewer report yourself or present your own critique as one.
+You are the **Elephant**: you hold the conversation and project context. Reviewers are not you. The default engine launches fresh BB worker threads in the reviewed project environment; they can use tools according to BB permissions and require explicit consent in the Elephant Goldfish tab. The optional Advanced endpoint is a single tool-less model call containing the persona, applicable document standard, shared plugin guidelines, numbered document, chosen context files and bounded historical decisions/context limitations. You never write a reviewer report yourself or present your own critique as one.
 
 ## Steps
 
@@ -30,6 +30,14 @@ You are the **Elephant**: you hold the conversation and project context. Reviewe
 
 ## Differences from upstream
 
+- New `full` and `feature_spec` Comprehension stages describe the proposal and
+  existing system in a separate report, without the reimplementation standard.
+  Read `stages[].paraphrase` in `egm_review_status`, even at zero findings; the
+  human can read it in the review history. It has no finding ID or decision gate.
+  Invalid or incomplete reports retain their error/limit reason and available
+  original text; they are not successful reviews. Brainstorm, Custom and older
+  stages keep their previous contracts. This is a local adaptation of selected
+  [upstream guidance @ 403d888](https://github.com/google/elephant-goldfish-model/blob/403d8881d62022490637d740657b33f01e321ea8/agents/comprehension.md).
 - Stages run without per-stage pause gates: findings may be decided while stages are running. After stages finish, the run waits in `awaiting_decisions` if any finding remains unresolved.
 - Fixes are never written by you. You propose a full revised document with `egm_propose`; use the addressed finding IDs, or `findingIds: []` for an agreed change without findings. The proposal is bound to the spec snapshot and the human confirms the diff in the tab; only then is the file changed.
 - After a confirmed change is applied and no finding is left unresolved, the plugin starts the next round on the applied version, up to `maxRounds`. Ad hoc changes wait for all findings, including partial findings from unsuccessful runs; when several changes are deferred, only the latest matching applied version is re-reviewed. They use the latest recorded review choices, or the full preset defaults if no review exists. If the file changed independently, the human must start a fresh review.

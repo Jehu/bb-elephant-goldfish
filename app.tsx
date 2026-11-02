@@ -611,6 +611,23 @@ function RunCard({ run, stages, onCancel }: { run: Run; stages: Stage[]; onCance
           </li>
         ))}
       </ol>
+      {mine.filter(stage => stage.reportFormat === "comprehension_v1" && (stage.paraphrase || stage.rawReport || stage.error)).map(stage => (
+        <details key={stage.id} open className="min-w-0 space-y-3 rounded-md border p-3">
+          <summary className="cursor-pointer text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-4">
+            Comprehension report{stage.state !== "completed" ? " · incomplete" : ""}
+          </summary>
+          <p className="text-xs text-muted-foreground">Stage {stage.position + 1} · reviewed version <span className="font-mono">{run.targetHash.slice(0, 10)}</span></p>
+          {stage.error && <p className="text-sm text-destructive">{stage.error}</p>}
+          {stage.paraphrase && <div className="max-w-prose space-y-4 break-words text-sm">
+            <section className="space-y-1"><h4 className="font-medium">What this proposes</h4><Markdown content={stage.paraphrase.proposal} /></section>
+            <section className="space-y-1"><h4 className="font-medium">How the existing system works, per this document</h4><Markdown content={stage.paraphrase.existingSystem} /></section>
+          </div>}
+          {stage.rawReport && <details className="min-w-0">
+            <summary className="cursor-pointer text-sm focus-visible:outline-2 focus-visible:outline-offset-4">Original incomplete or invalid report</summary>
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs">{stage.rawReport}</pre>
+          </details>}
+        </details>
+      ))}
       {run.context.length > 0 && (
         <p className="text-xs text-muted-foreground">Context: {run.context.join(", ")}</p>
       )}
@@ -913,8 +930,8 @@ function SpecDetail({ specId, threadId, threadCheckout, onBack, onDraft, target 
           <div className="flex items-start gap-3 rounded-md bg-muted/35 p-3">
             <Mark variant="goldfish" className="mt-0.5 size-5" />
             <div className="space-y-1">
-              <p className="text-sm font-medium">{showResolved ? "No findings yet" : "Nothing waits for a decision"}</p>
-              <p className="text-sm text-muted-foreground">{showResolved ? "Start a Goldfish review to see its findings here." : "Review open findings above, or start the existing Goldfish review when you are ready."}</p>
+              <p className="text-sm font-medium">{showResolved ? detail.runs.length ? "No findings" : "No findings yet" : "Nothing waits for a decision"}</p>
+              <p className="text-sm text-muted-foreground">{detail.runs.length ? "Read the review history below for reports and any incomplete stages." : "Start a Goldfish review to see its findings here."}</p>
             </div>
           </div>
         ) : (

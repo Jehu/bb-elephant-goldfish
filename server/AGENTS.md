@@ -11,7 +11,9 @@ spec changes for the Elephant Goldfish BB plugin.
 - `store.ts`: plugin SQLite migrations and persistence.
 - `engine.ts`: run/stage/finding/proposal lifecycle and restart reconciliation.
 - `goldfish.ts`: fresh, tool-less OpenAI-compatible review calls.
-- `prompts.ts`: pinned personas/standards, presets and finding parser.
+- `prompts.ts`: pinned personas/standards, presets and versioned report parsers.
+- `comprehension.md`: locally adapted paraphrase instructions for the new
+  full/feature-spec Comprehension report contract.
 - `review-guidelines.md`: canonical shared BB review rules, injected through
   `server.ts` agent configuration and every Goldfish stage; keep under 4096 characters.
 - `workspace.ts`: confined file reads and compare-and-replace apply protocol.
@@ -68,6 +70,12 @@ spec changes for the Elephant Goldfish BB plugin.
   the applied result hash; a different current version makes the run stale.
   Never hide cancellation, limits, stale versions or partial results.
 - Append SQLite migrations; never alter or reorder shipped migrations.
+- Each stage pins its report format. Legacy stages default to `findings_v1`;
+  only new full/feature-spec Comprehension stages use `comprehension_v1` with
+  stage standard `none`. Keep Custom's selectable standards unchanged.
+  Validate its two-part paraphrase and findings separately; malformed or limited
+  output is a non-success, never a synthetic finding or a clean empty review.
+  Retain raw text and project the same stored report to UI and Elephant tools.
 - Specs are unique by project, host, canonical checkout root and relative path.
   Bind the checkout at registration; never retarget an existing spec when a
   thread, environment path or preferred project source changes. Runs, context,

@@ -1,7 +1,6 @@
-// Goldfish prompt assembly from the pinned upstream personas and standards,
-// and parsing of the reviewers' natural-language reports into findings.
-// Upstream has no structured finding schema, so this adaptation asks for a
-// fixed line format and keeps the raw report beside whatever it parsed.
+// Goldfish prompt assembly and versioned report parsing. Legacy stages use
+// finding blocks; new full/feature-spec comprehension stages use JSON to
+// separate the paraphrase from findings. Both retain the original report.
 import bootstrapOrchestrator from "../upstream/agents/bootstrap_orchestrator.md" with { type: "text" };
 import codebaseDetails from "../upstream/agents/codebase_details.md" with { type: "text" };
 import comprehension from "../upstream/agents/comprehension.md" with { type: "text" };
@@ -17,6 +16,9 @@ import reimplementation from "../upstream/document_standards/re-implementation-s
 import zoomOutStandard from "../upstream/document_standards/zoom-out-standard.md" with { type: "text" };
 import type { DecisionKind, FindingState, LensId, PresetId, Severity, StandardId } from "./contract.ts";
 import reviewGuidelines from "./review-guidelines.md" with { type: "text" };
+import comprehensionReview from "./comprehension.md" with { type: "text" };
+import { z } from "zod";
+import { paraphraseSchema, type Paraphrase, type ReportFormat } from "./contract.ts";
 
 export { reviewGuidelines };
 
@@ -40,8 +42,8 @@ export const STANDARDS: Record<StandardId, string> = {
   "re-implementation-standard": reimplementation,
 };
 
-/** One stage of a review pipeline: a lens judged against a standard. */
-export type StagePlan = { lens: LensId; standard: StandardId };
+/** One review lens, its applicable standard and pinned output contract. */
+export type StagePlan = { lens: LensId; standard: StandardId | "none"; reportFormat?: ReportFormat };
 
 /**
  * Upstream egm_review presets. `full`: stages 5–9 (zoom out, comprehension,
@@ -54,7 +56,7 @@ export function presetStages(preset: PresetId, lenses: LensId[] | undefined, sta
     case "full":
       return [
         { lens: "zoom_out", standard: "zoom-out-standard" },
-        { lens: "comprehension", standard: "re-implementation-standard" },
+        { lens: "comprehension", standard: "none", reportFormat: "comprehension_v1" },
         { lens: "design_critic", standard: "feature-spec-standard" },
         { lens: "zoom_out", standard: "zoom-out-standard" },
         { lens: "implementation_readiness", standard: "implementation-readiness-standard" },
@@ -62,7 +64,7 @@ export function presetStages(preset: PresetId, lenses: LensId[] | undefined, sta
     case "feature_spec":
       return [
         { lens: "zoom_out", standard: "zoom-out-standard" },
-        { lens: "comprehension", standard: "re-implementation-standard" },
+        { lens: "comprehension", standard: "none", reportFormat: "comprehension_v1" },
         { lens: "design_critic", standard: "feature-spec-standard" },
         { lens: "zoom_out", standard: "zoom-out-standard" },
       ];
@@ -118,6 +120,23 @@ title: <one line>
 If you have no findings, answer exactly: NO FINDINGS
 `;
 
+const COMPREHENSION_FORMAT = `
+## Output format: comprehension_v1 (BB adaptation)
+Return exactly one JSON object, without a code fence or surrounding commentary:
+{
+  "paraphrase": { "proposal": "What the document proposes, in your own words.",
+                  "existingSystem": "How its existing system works, per this document." },
+  "findings": [{ "severity": "major", "title": "A concrete clarity gap",
+                 "body": "Affected scope, cause and consequences.", "lineStart": 1, "lineEnd": 2 }]
+}
+Both paraphrase fields must be nonempty text; Markdown is allowed inside them.
+Use an empty findings array when there are no findings. Every finding needs a
+severity (blocker, major or nit), nonempty title and body, and lineStart/lineEnd
+as positive integers in order, or both null. Do not return NO FINDINGS alone.
+You have no conversation history. Use only supplied evidence; identify uncertainty
+without guessing or inventing document content. Never try to change the document.
+`;
+
 export function stageMessages(args: {
   plan: StagePlan;
   /** Upstream personas branch on `Mode`: REVIEW audits a document, BRAINSTORM stress-tests a concept. */
@@ -129,7 +148,9 @@ export function stageMessages(args: {
   reviewContext?: ReviewContext;
 }): { role: "system" | "user"; content: string }[] {
   const { plan, mode, specPath, specContent, context, earlierReports } = args;
-  const system = [PERSONAS[plan.lens], "\n## Document standard\n", STANDARDS[plan.standard], reviewGuidelines, FORMAT].join("\n");
+  const system = plan.reportFormat === "comprehension_v1"
+    ? [comprehensionReview, reviewGuidelines, COMPREHENSION_FORMAT].join("\n")
+    : [PERSONAS[plan.lens], "\n## Document standard\n", plan.standard === "none" ? "" : STANDARDS[plan.standard], reviewGuidelines, FORMAT].join("\n");
   const numbered = specContent
     .split("\n")
     .map((line, i) => `${String(i + 1).padStart(4, " ")}| ${line}`)
@@ -161,6 +182,40 @@ export type ParsedFinding = {
   lineStart: number | null;
   lineEnd: number | null;
 };
+
+const comprehensionSchema = z.object({
+  paraphrase: paraphraseSchema,
+  findings: z.array(z.object({
+    severity: z.enum(["blocker", "major", "nit"]),
+    title: z.string().trim().min(1),
+    body: z.string().trim().min(1),
+    lineStart: z.number().int().positive().nullable(),
+    lineEnd: z.number().int().positive().nullable(),
+  }).strict().refine(f => f.lineStart === null ? f.lineEnd === null : f.lineEnd !== null && f.lineEnd >= f.lineStart,
+    "lineStart/lineEnd must both be null or an ordered pair")),
+}).strict();
+
+export function parseComprehension(report: string):
+  | { ok: true; paraphrase: Paraphrase; findings: ParsedFinding[] }
+  | { ok: false; error: string } {
+  let value: unknown;
+  try { value = JSON.parse(report); }
+  catch { return { ok: false, error: "Invalid comprehension report: expected one JSON object" }; }
+  const parsed = comprehensionSchema.safeParse(value);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0]!;
+    return { ok: false, error: `Invalid comprehension report: ${issue.path.join(".") || "root"}: ${issue.message}` };
+  }
+  return { ok: true, paraphrase: parsed.data.paraphrase,
+    findings: parsed.data.findings.map(f => ({ ...f, rawSeverity: f.severity })) };
+}
+
+export function comprehensionMarkdown(paraphrase: Paraphrase, findings: ParsedFinding[]): string {
+  return ["## What this proposes", "", paraphrase.proposal, "",
+    "## How the existing system works, per this document", "", paraphrase.existingSystem, "",
+    "## Findings", "", ...(findings.length === 0 ? ["No findings."] : findings.map(f =>
+      `### ${f.title}\n\nSeverity: ${f.rawSeverity} · Lines: ${f.lineStart === null ? "none" : `${f.lineStart}-${f.lineEnd}`}\n\n${f.body}`))].join("\n");
+}
 
 const severityOf = (raw: string): Severity => {
   const s = raw.toLowerCase();

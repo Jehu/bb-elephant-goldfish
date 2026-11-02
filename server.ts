@@ -349,7 +349,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.registerTool({
     name: "egm_review_status",
     description:
-      "Read a spec's review state: runs, stages, findings (with ids, severity, state, human decisions) and proposals. Use it to see what the human decided and which findings wait for you.",
+      "Read a spec's review state: runs, stages (including separate comprehension paraphrases and incomplete report text), findings (with ids, severity, state, human decisions) and proposals. Use it to see what the human decided and which findings wait for you.",
     presentation: { label: { pending: "Reading review status", completed: "Read review status" } },
     parameters: z.object({ specId: z.string() }),
     async execute({ specId }, { projectId, threadId }) {
